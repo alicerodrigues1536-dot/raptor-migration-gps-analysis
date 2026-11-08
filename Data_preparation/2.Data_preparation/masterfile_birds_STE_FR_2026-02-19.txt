@@ -1,0 +1,43 @@
+study-name-2	individual.taxon.canonical.name	individual.local.identifier	animal-sex	animal-ring-id	animal-exact-date-of-birth	animal-exact-date-of-death	animal-death-comments	animal-death-country	animal-death-lon	animal-death-lat	study-name	remarks	remarks-2
+													
+STE_FR	Circaetus gallicus	Abel de la Trejasse	m	CA61908	16/06/2022	08/10/2023 22:15	Wind turbine collision	Spain			Short-toed Eagles France	Had wind turbine collision on 2023-09-13 14:06:00 in Spain, but did not die. Brought to bird center, released but died shortly afterwards.	
+													
+STE_FR	Circaetus gallicus	Apollon de Durance	m	CA72451									
+													
+STE_FR	Circaetus gallicus	Aupsie	f	CA66875									
+													
+STE_FR	Circaetus gallicus	Bandiat des grands bois	m	CA66480		18/08/2024 23:30	Bacterial infection	France				Died during night 18/19-08, only 4 d after release from bird centre	
+													
+STE_FR	Circaetus gallicus	Chantal 2.0	f	CA61907		15/07/2022 13:00	Collision electric wire	France			Short-toed Eagles France		
+													
+STE_FR	Circaetus gallicus	Charline de la Grisonnière	f	CA66477									
+													
+STE_FR	Circaetus gallicus	Henri de la Trejasse	m	CA66876									
+													
+STE_FR	Circaetus gallicus	La Barben Sufferchoix	f	CA61905		06/02/2023 16:35	Unknown	Mali			Short-toed Eagles France		
+													
+STE_FR	Circaetus gallicus	La Diva de Buoux	f	CA61902							Short-toed Eagles France		
+													
+STE_FR	Circaetus gallicus	Major de Rians	m	CA61903	08/06/2022						Short-toed Eagles France		
+													
+STE_FR	Circaetus gallicus	Marc-Aurèle de Cauvières	m	CA61909							Short-toed Eagles France	Daughter of La Diva de Buoux	
+													
+STE_FR	Circaetus gallicus	Mina de Rians	f	CA61906							Short-toed Eagles France		
+													
+STE_FR	Circaetus gallicus	Robin Nohood	m	CA61910							Short-toed Eagles France		
+													
+STE_FR	Circaetus gallicus	Tartarin de Sufferchoix	m	CA61904			Unknown				Short-toed Eagles France		
+													
+STE_FR	Circaetus gallicus	Tibordure du Chillou	m	CA72456							Short-toed Eagles France		
+													
+STE_FR	Circaetus gallicus	Tombé du Chillou	m	CA66478							Short-toed Eagles France		
+													
+STE_FR	Circaetus gallicus	Jaumegarde		CA72455							Short-toed Eagles France		
+													
+STE_FR	Circaetus gallicus	Lambescaine		CA72454							Short-toed Eagles France		
+													
+STE_FR	Circaetus gallicus	Jean de Cadarache		CA72381							Short-toed Eagles France		
+													
+STE_FR	Circaetus gallicus	Jacquemus de la Fanette		CA72452		10/5/26 11:40	Electrocution or collision with vehicle				Short-toed Eagles France		
+													
+STE_FR	Circaetus gallicus	Broken Sambuc		CA72453			Unknown				Short-toed Eagles France		

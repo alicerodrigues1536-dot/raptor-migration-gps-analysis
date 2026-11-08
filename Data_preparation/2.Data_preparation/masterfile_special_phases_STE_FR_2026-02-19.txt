@@ -1,0 +1,2 @@
+individual-local-identifier	year	study-name-2	species	tag-local-identifier	nest-ID	phase-start	phase-end	phase-type	remarks
+Abel de la Trejasse	2023	STE_FR	Circaetus gallicus	212218	NA	2023-09-13 14:06:00	2023-10-03 13:08:00	Captive	Had wind turbine collision on 2023-09-13 14:06:00 in Spain, but did not die. Brought to bird centre ca. on 2023-09-14 11:00:00.

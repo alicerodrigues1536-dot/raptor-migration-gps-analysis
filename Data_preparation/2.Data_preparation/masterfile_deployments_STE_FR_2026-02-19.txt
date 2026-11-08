@@ -1,0 +1,20 @@
+study-name-2	tag-local-identifier	tag-local-identifier-2	tag-manufacturer-name	tag-model	individual-local-identifier	animal-life-stage	deploy-on-date	deploy-on-date-precise	animal-mass	animal-wing	deploy-on-person	deploy-off-date	deployment-end-type	deploy-off-person	deploy-off-contact	remarks
+STE_FR	212229	NA	Ornitela	OT-E25B-3GC	La Barben Sufferchoix	adult	16/06/2021 10:55	y	1750	545	Alexandre Millon	06/02/2023 17:20	dead			
+STE_FR	212230	NA	Ornitela	OT-E25B-3GC	La Diva de Buoux	adult	17/03/2022 09:00	y	1845	530	Alexandre Millon					Equipped at bird centre of Buoux on 15-03, released on 17-03 at Bonnieux (13).
+STE_FR	212217	NA	Ornitela	OT-E25B-3GC	Chantal 2.0	adult	21/03/2022 09:00	y	NA	531	Benoît Van Hecke	15/07/2022 11:00	injured			Equipped at bird centre of Clermont on 19-03, released on 21-03 at Gergovie (63). Found with broken leg and died during trip to bird centre.
+STE_FR	220759	NA	Ornitela	OT-E25B-3GC	Major de Rians	1CY	28/07/2022 00:00	n	1530	374	Benoît Van Hecke					About 50 days old at deployment
+STE_FR	212218	NA	Ornitela	OT-E25B-3GC	Abel de la Trejasse	1CY	05/08/2022 00:00	n	1635	351	Alexandre Millon	09/10/2023 17:05	dead			About 50 days old at deployment
+STE_FR	212217	NA	Ornitela	OT-E25B-3GC	Henri de la Trejasse	1CY	13/07/2023 00:00	n	1563	330	Benoît Van Hecke					
+STE_FR	220760	NA	Ornitela	OT-E25B-3GC	Mina de Rians	1CY	24/07/2023 00:00	n	2040	424	Alexandre Millon					
+STE_FR	235065	NA	Ornitela	OT-E25-4GEC	Tartarin de Sufferchoix	1CY	28/07/2023 00:00	n	1600	391	Alexandre Millon					
+STE_FR	235066	NA	Ornitela	OT-E25B-4GEC	Aupsie	adult	13/06/2024 11:52	y	1760	555	TS/AM					Equipped at bird centre of Buoux on 06-06, released on 13-06
+STE_FR	245265	NA	Ornitela	OT-E25B-4GEC	Marc-Aurèle de Cauvières	1CY	05/07/2024 00:00	n	1520	310	Alexandre Millon					Daughter of La Diva de Buoux
+STE_FR	212218	NA	Ornitela	OT-E25B-3GC	Charline de la Grisonnière	1CY	17/07/2024 00:00	n	1705	345	Benoît Van Hecke					
+STE_FR	223734	NA	Ornitela	OT-E25B-3GC	Tombé du Chillou	1CY	17/07/2024 00:00	n	1515	370	Benoît Van Hecke					
+STE_FR	232364	NA	Ornitela	OT-E25B-4GEC	Bandiat des grands bois	adult	14/08/2024 00:00	n	1780	510	Benoît Van Hecke	19/08/2024 15:00	dead	Benoît Van Hecke		Equipped at bird centre on 14-08, released the same day
+STE_FR	375014	NA	Ornitela	OT-E25B-4GEC	Robin Nohood	adult	26/06/2025 00:00	n	1480	505	Alexandre Millon					Equipped at bird centre on 12-06, released 26-06
+STE_FR	232364	NA	Ornitela	OT-E25B-4GEC	Tibordure du Chillou	1CY	08/07/2025 00:00	n	1375	295	Benoît Van Hecke					
+STE_FR	246099	NA	Ornitela	OT-E25B-4GEC	Apollon de Durance	1CY	21/07/2025 00:00	n	1560	435	Alexandre Millon					
+STE_FR	375012	NA	Ornitela	OT-E25B-4GEC	Lambescaine	1CY	09/07/2026 09:30	y	1630	385	Alexandre Millon					
+STE_FR	383770	NA	Ornitela	OT-E25B-4GEC	Jaumegarde	1CY	16/07/2026 20:00	y	1640	363	Alexandre Millon					
+STE_FR	375013	NA	Ornitela	OT-E25B-4GEC	Jean de Cadarache	adult	10/10/2026 14:50	y	1580	542	Alexandre Millon					

@@ -1,0 +1,1688 @@
+---
+title: "Test découpe Tracks HF"
+author: "Alice Rodrigues"
+format: pdf
+execute:
+  echo: true    # Affiche le code (false pour cacher)
+  warning: false  # Cache les warnings
+editor: visual
+---
+
+# Libraries
+
+```{r}
+library(here)
+library(dplyr)
+library(purrr)
+
+library(sp)
+library(geosphere) # For distance calculations
+```
+
+# Chargement des données
+
+```{r}
+
+# Data point par point au sein des tracks de HF
+load(here("Alice/STE_data_preparation_June_2026/2.Data_preparation/2.1_OUTPUT_STE_France_processed_HF_A_2026-11-08.RData"))
+DATA_HF <- data_HF
+
+# TRACKS HF non segmentés
+TRACKS_HF_2026_ALL <- read.csv(here("Alice/STE_data_preparation_June_2026/2.Data_preparation/2.5_OUTPUT_STE_France_HF_track_table_2026-11-08.csv"))
+
+# Daytable For comparison:
+load(here("Alice/STE_data_preparation_June_2026/2.Data_preparation/2.2_OUTPUT_STE_France_Daytable_2026-11-08.RData"))
+```
+
+# Distribution et variance des tracks
+
+```{r}
+# Distribution en fonction de la durée
+hist(TRACKS_HF_2026_ALL$TS)
+library(ggplot2)
+
+ggplot(TRACKS_HF_2026_ALL, aes(x = TS)) +
+  geom_histogram(
+    binwidth = 5,          # ajuste selon la distribution (essaie 1, 2, 5, 10...)
+    fill = "#4C7C4C",       # vert, cohérent avec ta palette adultes
+    color = "white",
+    boundary = 0
+  ) +
+  labs(
+    title = "Distribution of high-frequency GPS track durations",
+    x = "Track duration (min)",
+    y = "Count"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    panel.grid.minor = element_blank()
+  )
+
+
+summary(TRACKS_HF_2026_ALL$TS)
+sum(TRACKS_HF_2026_ALL$TS < 1, na.rm = TRUE) # 778 tracks < 1
+sum(TRACKS_HF_2026_ALL$TS > 1, na.rm = TRUE) # 4063 tracks > 1
+sum(TRACKS_HF_2026_ALL$TS < 1.5, na.rm = TRUE) # 1093 tracks < 1.5
+sum(TRACKS_HF_2026_ALL$TS > 60, na.rm = TRUE) # 611 tracks > 1h
+
+# Variance en fonction de la durée
+plot(TRACKS_HF_2026_ALL$speed_GPS_median ~ TRACKS_HF_2026_ALL$TS,
+     pch = 16, col = "grey40")
+
+lines(lowess(TRACKS_HF_2026_ALL$TS,
+             TRACKS_HF_2026_ALL$speed_GPS_median,
+             f = 0.6),
+      col = "blue", lwd = 2)
+
+# Que TS entre 0 et 5 : SPEED
+# Filtrer TS 0-5 ET sans NA
+short_tracks <- TRACKS_HF_2026_ALL[
+  TRACKS_HF_2026_ALL$TS >= 0 & 
+  TRACKS_HF_2026_ALL$TS <= 5 &
+  !is.na(TRACKS_HF_2026_ALL$speed_GPS_median), 
+]
+
+plot(short_tracks$speed_GPS_median ~ short_tracks$TS,
+     pch = 16, col = "grey40",
+     xlim = c(0, 5), ylim = range(short_tracks$speed_GPS_median, na.rm = TRUE),
+     xlab = "TS (durée track)", ylab = "Vitesse GPS médiane")
+
+lines(lowess(short_tracks$TS, short_tracks$speed_GPS_median, f = 0.6),
+      col = "blue", lwd = 2)
+
+
+# Que TS entre 0 et 5 : HEIGHT
+# Filtrer TS 0-5 ET sans NA
+short_tracks <- TRACKS_HF_2026_ALL[
+  TRACKS_HF_2026_ALL$TS >= 0 & 
+  TRACKS_HF_2026_ALL$TS <= 5 &
+  !is.na(TRACKS_HF_2026_ALL$height.above.ground_GPS_median), 
+]
+
+plot(short_tracks$height.above.ground_GPS_median ~ short_tracks$TS,
+     pch = 16, col = "grey40",
+     xlim = c(0, 5), ylim = range(short_tracks$height.above.ground_GPS_median, na.rm = TRUE),
+     xlab = "TS (durée track)", ylab = "Hauteur_sol médiane")
+
+lines(lowess(short_tracks$TS, short_tracks$height.above.ground_GPS_median, f = 0.6),
+      col = "blue", lwd = 2)
+```
+
+# Calcul du seuil d'autocorrélation :
+
+Moyenne de la durée (3s entre chaque pt) necessaire pour non réplication PAR METRIQUE
+
+On considèrera qu'à **lag n**, si `acf(lag n) < 0.2`, les points sont **suffisamment indépendants** pour l'échantillonnage :
+
+Rq : Les petits tracks ne peuvent pas être pseudorépliqués entre eux, car la balise passe en BF donc forcément 5min d'écart
+
+```{r}
+#| label: Séléction des tracks > 1h
+conflicts_prefer(dplyr::filter)
+
+# Liste des HF.ID à garder
+hf_to_keep <- TRACKS_HF_2026_ALL %>%
+  filter(TS >= 5) %>% # A 5min
+  pull(HF.ID) %>%
+  unique()
+
+# Filtrer DATA_HF
+DATA_HF_filtered <- DATA_HF %>%
+  filter(HF.ID %in% hf_to_keep)
+
+
+# Diagnostic
+DATA_HF_filtered %>%
+  group_by(HF.ID) %>%
+  summarise(
+    n_points = n(),
+    n_valid_height = sum(!is.na(height.above.ground_GPS)),
+    pct_valid = n_valid_height / n_points * 100
+  ) %>%
+  summary()
+
+```
+
+## ground.speed
+
+```{r}
+# ================================
+# AUTOCORRELATION POUR TOUS LES TRACKS
+# ================================
+
+acf_results <- DATA_HF_filtered %>%
+  group_by(HF.ID) %>%
+  summarise(
+    acf_lag1 = {
+      # On enlève les NA
+      x <- na.omit(ground.speed)
+      
+      # On vérifie qu'il y a assez de points
+      if(length(x) > 2) {
+        # On calcule l'autocorrélation lag 1
+        acf(x, plot = FALSE)$acf[2]
+      } else {
+        NA
+      }
+    }
+  )
+
+# → Résultat : une valeur par track
+# → permet de voir si la pseudoréplication est générale
+summary(acf_results) # En moyenne la pseudoreplication au sein des tracks est de 0.81403 pour la vitesse
+
+# ================================
+# TROUVER LE TEMPS D'INDEPENDANCE POUR TOUS LES TRACKS
+# ================================
+
+lag_results <- DATA_HF_filtered %>%
+  group_by(HF.ID) %>%
+  summarise(
+    lag_indep = {
+      x <- na.omit(ground.speed)
+      acf_vals <- acf(x, plot = FALSE)$acf
+      
+      # Protection anti-aberrant + seuil 0.2
+      lag_threshold <- min(length(x)*0.1, 100)
+      first_lag <- which(acf_vals < 0.2)[1]
+      min(first_lag, lag_threshold, na.rm = TRUE)
+    }
+  )
+
+summary(lag_results)
+
+# → Résultat : combien de points pour devenir indépendant (par track)
+lag_results
+summary(lag_results) # vitesse (6 points median 7.5 points en moyenne)
+
+# Moyenne de lag_indep de tous les tracks
+lag_indep_mean <- mean (lag_results$lag_indep, na.rm = TRUE)
+lag_indep_mean
+
+# ================================
+# PASSER DES POINTS AU TEMPS
+# ================================
+
+# Pas de temps moyen pour un track : 3 secondes
+
+# Temps d'indépendance (en secondes)
+time_indep_mean_speed <- (lag_indep_mean * 3)/60
+time_indep_mean_speed
+
+# ================================
+# CHOISIR UNE TAILLE DE SEGMENT : Avec cette méthode ce sont les plus petits segments possibles ET indépendants les uns des autres qui sont choisis.
+# ================================
+
+# Règle : segment = 3 fois le temps d'indépendance
+
+time_segment_speed <- (time_indep_mean_speed * 3)
+time_segment_speed 
+
+
+###
+lag_results_corrected <- DATA_HF_filtered %>%
+  group_by(HF.ID) %>%
+  summarise(
+    lag_indep = {
+      x <- na.omit(ground.speed)
+      if (length(x) > 2) {
+        lag_threshold <- min(length(x) * 0.1, 100)
+        acf_vals <- acf(x, plot = FALSE, lag.max = ceiling(lag_threshold))$acf
+        first_lag <- which(acf_vals < 0.2)[1]
+        min(first_lag, lag_threshold, na.rm = TRUE)
+      } else {
+        NA
+      }
+    }
+  )
+
+mean(lag_results_corrected$lag_indep, na.rm = TRUE)
+(mean(lag_results_corrected$lag_indep, na.rm = TRUE) * 3) / 60  # en minutes
+
+```
+
+Représentation
+
+```{r}
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+
+# ================================
+# RECALCUL CORRIGÉ (lag.max étendu)
+# ================================
+lag_results_corrected <- DATA_HF_filtered %>%
+  group_by(HF.ID) %>%
+  summarise(
+    lag_indep = {
+      x <- na.omit(ground.speed)
+      if (length(x) > 2) {
+        lag_threshold <- min(length(x) * 0.1, 100)
+        acf_vals <- acf(x, plot = FALSE, lag.max = ceiling(lag_threshold))$acf
+        first_lag <- which(acf_vals < 0.2)[1]
+        min(first_lag, lag_threshold, na.rm = TRUE)
+      } else {
+        NA
+      }
+    }
+  )
+
+lag_indep_mean_corrected <- mean(lag_results_corrected$lag_indep, na.rm = TRUE)
+time_indep_mean_corrected <- (lag_indep_mean_corrected * 3) / 60
+
+# ================================
+# PANEL A : exemple de courbe ACF (version rapide)
+# ================================
+
+# Stats par track calculées une seule fois (rapide, vectorisé)
+track_stats <- DATA_HF_filtered %>%
+  group_by(HF.ID) %>%
+  summarise(
+    n_valid = sum(!is.na(ground.speed)),
+    sd_valid = sd(ground.speed, na.rm = TRUE)
+  )
+
+# Jointure au lieu de rowwise
+valid_tracks <- lag_results_corrected %>%
+  filter(!is.na(lag_indep)) %>%
+  left_join(track_stats, by = "HF.ID") %>%
+  filter(n_valid > 30, sd_valid > 0.1)
+
+example_id <- valid_tracks$HF.ID[which.min(abs(valid_tracks$lag_indep - median(valid_tracks$lag_indep, na.rm = TRUE)))]
+
+x_example <- DATA_HF_filtered %>%
+  filter(HF.ID == example_id) %>%
+  pull(ground.speed) %>%
+  na.omit()
+
+length(x_example)
+sd(x_example, na.rm = TRUE)
+
+# ================================
+acf_vals_ex <- acf(x_example, plot = FALSE, lag.max = 30)$acf
+acf_df <- data.frame(lag = 0:(length(acf_vals_ex) - 1), acf = as.numeric(acf_vals_ex))
+lag_indep_example <- which(acf_df$acf < 0.2)[1] - 1
+
+p_acf <- ggplot(acf_df, aes(x = lag, y = acf)) +
+  geom_hline(yintercept = 0.2, linetype = "dashed", color = "grey40") +
+  geom_segment(aes(x = lag, xend = lag, y = 0, yend = acf), color = "dodgerblue4", linewidth = 0.7) +
+  geom_point(color = "dodgerblue4", size = 2) +
+  geom_vline(xintercept = lag_indep_example, linetype = "dotted", color = "navyblue", linewidth = 0.8) +
+  annotate("text", x = lag_indep_example + 1, y = 0.85,
+           label = paste0("Independence lag = ", lag_indep_example, " pts"),
+           hjust = 0, size = 3.5, color = "navyblue") +
+  labs(
+    title = "(A)",
+    x = "Lag (points, 3-sec resolution)",
+    y = "Autocorrelation (ACF)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 12))
+
+p_acf
+
+# ================================
+# PANEL B : distribution corrigée (plus de pic artificiel à 100)
+# ================================
+p_lagdist <- ggplot(lag_results_corrected, aes(x = lag_indep)) +
+  geom_histogram(binwidth = 1, fill = "dodgerblue4", color = "white", alpha = 0.85) +
+  geom_vline(xintercept = lag_indep_mean_corrected, color = "navyblue", linewidth = 1, linetype = "dashed") +
+  annotate("text", x = lag_indep_mean_corrected + 1, y = Inf,
+           label = paste0("Mean = ", round(lag_indep_mean_corrected, 1), " pts (", 
+                           round(time_indep_mean_corrected, 2), " min)"),
+           hjust = 0, vjust = 2, size = 3.5, color = "navyblue") +
+  labs(
+    title = "(B)",
+    x = "Lag at ACF < 0.2 (points)",
+    y = "Number of tracks"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 12))
+p_lagdist
+
+# Combien de tracks plafonnent vraiment à 100 ?
+n_capped <- sum(lag_results_corrected$lag_indep == 100, na.rm = TRUE)
+n_total <- sum(!is.na(lag_results_corrected$lag_indep))
+n_capped
+n_total
+
+
+
+# ================================
+# COMBINER + note en légende
+# ================================
+final_plot <- p_acf + p_lagdist +
+  plot_annotation(
+    subtitle = "Segments cut at the independence lag (ACF < 0.2)",
+    caption = paste0(
+      "Segments used in analyses: 1.51 min. Refined estimate shown here: ",
+      round(time_indep_mean_corrected, 2), " min (~11% difference due to ACF lag-range truncation in the original computation)."
+    ),
+    theme = theme(
+      plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+      plot.subtitle = element_text(size = 11, hjust = 0.5, color = "grey30"),
+      plot.caption = element_text(size = 8.5, hjust = 0.5, color = "grey40", face = "italic")
+    )
+  )
+
+final_plot
+
+ggsave(
+  filename = here("Figures/ANNEXES/acf_segment_methodology.png"),
+  plot = final_plot,
+  width = 10, height = 4.7, dpi = 300
+)
+```
+
+## height
+
+```{r}
+# ================================
+# AUTOCORRELATION POUR TOUS LES TRACKS
+# ================================
+
+acf_results <- DATA_HF_filtered %>%
+  group_by(HF.ID) %>%
+  summarise(
+    acf_lag1 = {
+      # On enlève les NA
+      x <- na.omit(height.above.ground_GPS)
+      
+      # On vérifie qu'il y a assez de points
+      if(length(x) > 2) {
+        # On calcule l'autocorrélation lag 1
+        acf(x, plot = FALSE)$acf[2]
+      } else {
+        NA
+      }
+    }
+  )
+
+# → Résultat : une valeur par track
+# → permet de voir si la pseudoréplication est générale
+summary(acf_results) # En moyenne la pseudoreplication au sein des tracks est de 0.7343 pour la vitesse
+
+
+# ================================
+# TROUVER LE TEMPS D'INDEPENDANCE POUR TOUS LES TRACKS
+# ================================
+
+# Calcule le temps d'indépendance pour chaque track (hauteur)
+lag_results <- DATA_HF_filtered %>%
+  group_by(HF.ID) %>%
+  summarise(
+    lag_indep = {
+      # Extrait la série hauteur du track et supprime les NA
+      x <- na.omit(height.above.ground_GPS)
+      # Calcule la fonction d'autocorrélation complète (sans graphique)
+      acf_vals <- acf(x, plot = FALSE)$acf
+      
+      # Plafond protecteur : max 10% de la série ou 100 lags
+      lag_threshold <- min(length(x)*0.1, 100)
+      # Trouve le 1er lag où corrélation < seuil 0.2
+      first_lag <- which(acf_vals < 0.2)[1]
+      # Retourne le minimum (protection anti-lag aberrant)
+      min(first_lag, lag_threshold, na.rm = TRUE)
+    }
+  )
+
+summary(lag_results)  # Beaucoup moins de NA 
+
+# → Résultat : combien de points pour devenir indépendant (par track)
+lag_results
+summary(lag_results) # vitesse (6 points median 7.5 points en moyenne)
+
+# Moyenne de lag_indep de tous les tracks
+lag_indep_mean <- mean (lag_results$lag_indep, na.rm = TRUE)
+lag_indep_mean # 99.76471 pts
+
+# ================================
+# PASSER DES POINTS AU TEMPS
+# ================================
+
+# Pas de temps moyen pour un track : 3 secondes
+
+# Temps d'indépendance (en secondes)
+time_indep_mean_height <- (lag_indep_mean * 3)/60
+time_indep_mean_height
+
+# ================================
+# CHOISIR UNE TAILLE DE SEGMENT : Avec cette méthode ce sont les plus petits segments possibles ET indépendants les uns des autres qui sont choisis.
+# ================================
+
+# Règle : segment = 3 fois le temps d'indépendance
+
+time_segment_height <- (time_indep_mean_height * 3)
+time_segment_height # 14.96471 minutes
+```
+
+Représentation
+
+```{r}
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+
+# ================================
+# RECALCUL CORRIGÉ (lag.max étendu) - HAUTEUR
+# ================================
+lag_results_height_corrected <- DATA_HF_filtered %>%
+  group_by(HF.ID) %>%
+  summarise(
+    lag_indep = {
+      x <- na.omit(height.above.ground_GPS)
+      if (length(x) > 2) {
+        lag_threshold <- min(length(x) * 0.1, 100)
+        acf_vals <- acf(x, plot = FALSE, lag.max = ceiling(lag_threshold))$acf
+        first_lag <- which(acf_vals < 0.2)[1]
+        min(first_lag, lag_threshold, na.rm = TRUE)
+      } else {
+        NA
+      }
+    }
+  )
+
+lag_indep_mean_height_corrected <- mean(lag_results_height_corrected$lag_indep, na.rm = TRUE)
+time_indep_mean_height_corrected <- (lag_indep_mean_height_corrected * 3) / 60
+
+# ================================
+# PANEL A : exemple de courbe ACF (hauteur)
+# ================================
+
+track_stats_height <- DATA_HF_filtered %>%
+  group_by(HF.ID) %>%
+  summarise(
+    n_valid = sum(!is.na(height.above.ground_GPS)),
+    sd_valid = sd(height.above.ground_GPS, na.rm = TRUE)
+  )
+
+valid_tracks_height <- lag_results_height_corrected %>%
+  filter(!is.na(lag_indep)) %>%
+  left_join(track_stats_height, by = "HF.ID") %>%
+  filter(n_valid > 30, sd_valid > 0.1)
+
+example_id_height <- valid_tracks_height$HF.ID[which.min(abs(valid_tracks_height$lag_indep - median(valid_tracks_height$lag_indep, na.rm = TRUE)))]
+
+x_example_height <- DATA_HF_filtered %>%
+  filter(HF.ID == example_id_height) %>%
+  pull(height.above.ground_GPS) %>%
+  na.omit()
+
+length(x_example_height)
+sd(x_example_height, na.rm = TRUE)
+
+# ================================
+acf_vals_ex_height <- acf(x_example_height, plot = FALSE, lag.max = 100)$acf
+acf_df_height <- data.frame(lag = 0:(length(acf_vals_ex_height) - 1), acf = as.numeric(acf_vals_ex_height))
+lag_indep_example_height <- which(acf_df_height$acf < 0.2)[1] - 1
+
+p_acf_height <- ggplot(acf_df_height, aes(x = lag, y = acf)) +
+  geom_hline(yintercept = 0.2, linetype = "dashed", color = "grey40") +
+  geom_segment(aes(x = lag, xend = lag, y = 0, yend = acf), color = "dodgerblue4", linewidth = 0.7) +
+  geom_point(color = "dodgerblue4", size = 2) +
+  geom_vline(xintercept = lag_indep_example_height, linetype = "dotted", color = "navyblue", linewidth = 0.8) +
+  annotate("text", x = lag_indep_example_height - 1, y = 0.85,
+           label = paste0("Independence lag = ", lag_indep_example_height, " pts"),
+           hjust = 1, size = 3.5, color = "navyblue") +
+  labs(
+    title = "(A)",
+    x = "Lag (points, 3-sec resolution)",
+    y = "Autocorrelation (ACF)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 12))
+
+p_acf_height
+
+# ================================
+# PANEL B : distribution corrigée - HAUTEUR
+# ================================
+p_lagdist_height <- ggplot(lag_results_height_corrected, aes(x = lag_indep)) +
+  geom_histogram(binwidth = 1, fill = "dodgerblue4", color = "white", alpha = 0.85) +
+  geom_vline(xintercept = lag_indep_mean_height_corrected, color = "navyblue", linewidth = 1, linetype = "dashed") +
+  annotate("text", x = lag_indep_mean_height_corrected + 1, y = Inf,
+           label = paste0("Mean = ", round(lag_indep_mean_height_corrected, 1), " pts (", 
+                           round(time_indep_mean_height_corrected, 2), " min)"),
+           hjust = 0, vjust = 2, size = 3.5, color = "navyblue") +
+  labs(
+    title = "(B)",
+    x = "Lag at ACF < 0.2 (points)",
+    y = "Number of tracks"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 12))
+
+p_lagdist_height
+
+# Combien de tracks plafonnent vraiment à 100 ?
+n_capped_height <- sum(lag_results_height_corrected$lag_indep == 100, na.rm = TRUE)
+n_total_height <- sum(!is.na(lag_results_height_corrected$lag_indep))
+n_capped_height
+n_total_height
+n_capped_height / n_total_height * 100  # pourcentage
+
+# ================================
+# COMBINER + note en légende
+# ================================
+library(stringr)
+
+final_plot_height <- p_acf_height + p_lagdist_height +
+  plot_annotation(
+    subtitle = "Segments cut at the independence lag (ACF < 0.2)",
+    caption = str_wrap(
+      paste0(
+        "Segments used in analyses: 14.96 min. Refined estimate shown here: ",
+        round(time_indep_mean_height_corrected, 2), " min. Note: ", n_capped_height, " of ", n_total_height,
+        " tracks (", round(n_capped_height / n_total_height * 100, 1), 
+        "%) show persistent autocorrelation across the full tested lag range and were conservatively capped at 100 points (5 min)."
+      ),
+      width = 110  # ajuste selon la largeur de ta figure
+    ),
+    theme = theme(
+      plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+      plot.subtitle = element_text(size = 11, hjust = 0.5, color = "grey30"),
+      plot.caption = element_text(size = 8.5, hjust = 0.5, color = "grey40", face = "italic", lineheight = 1.2)
+    )
+  )
+
+final_plot_height
+
+ggsave(
+  filename = here("Figures/ANNEXES/acf_segment_methodology_height.png"),
+  plot = final_plot_height,
+  width = 10, height = 4.7, dpi = 300
+)
+```
+
+# Création des jeux de données sub
+
+```         
+time_indep_mean_height # =  (pour la hauteur) [1] 2.880817 min
+time_indep_mean_speed # = (pour la vitesse)  [1] 1.512256 min
+```
+
+## En prenant 1 point par intervalle (sans découpe)
+
+### data_sub_speed
+
+#### Subsampling
+
+```{r}
+# time_indep_mean_speed # = (pour la vitesse)  [1]  1.494527 min
+attach(data_HF)
+
+# Script Lucile MORCELET 10/04/2026
+# Subsampling GPS tracking at the individual level
+
+# data$timestamp must be formatted as POSIXct object
+# data$Individual_ID is a character or factor.
+
+# Extracting timestamps
+timestamp_num_min <- as.numeric(data_HF$timestamp) / 60
+
+# Delimitation of the subsampling interval : definition of the parameters ----
+  dtime.aim <- time_indep_mean_speed # expected sub-sampling frequency (mins)
+  tolerance <- 30/60 # tolerance of 30s (indicated in mins)
+  # positions > (dtime.aim - tolerance) can be selected only if no other localisation are closer to dtime.aim  
+
+  dindex_max <- tolerance * 60 * 2 # assuming minimum time difference of 1 second 
+  sub.index <- NULL # vector to store subsampled localisation index
+  
+# Subsampling dataset at the level of each individuals -----  
+for(p in unique(data_HF$individual.local.identifier)) {
+  
+  
+  index_tag <- which(data_HF$individual.local.identifier == p) # Vector of index for each localisation
+  sub.index[length(sub.index) + 1] <- index_tag[1] # Always start with the first localisation 
+  
+  if(length(index_tag) > 1){
+    
+    # Check if time lag between k and last selected localisation is within the sub-sampling frequency (i.e., dtime.aim +/- tolerance)
+    for(k in 2:length(index_tag)){
+      # Check if selected localisation is posterior in time
+      if(index_tag[k] > sub.index[length(sub.index)]){
+        
+        # If both localisation are enough distant in time:
+        if(timestamp_num_min[index_tag[k]] -
+           timestamp_num_min[sub.index[length(sub.index)]] > (dtime.aim - tolerance)){
+          
+          # 1) and k is the last localisation : k localisation is selected
+          if(k == length(index_tag)){
+            sub.index[length(sub.index) + 1] <- index_tag[k]
+            
+            # 2) and next localisation after k is enough distant in time : k localisation is selected   
+          } else if((timestamp_num_min[index_tag[k] + 1] -
+                     timestamp_num_min[sub.index[length(sub.index)]]) > (dtime.aim + tolerance)) {
+            sub.index[length(sub.index) + 1] <- index_tag[k]
+            
+            # 3) else look for the next localisation that respect dtime.aim
+          } else {
+            # index_max either based on dtime.aim + tolerance, or last position of tag
+            index_max <- ifelse((k + dindex_max) < length(index_tag), (k + dindex_max), length(index_tag))
+            
+            # Calculate timelag between last selected position and non-subsampled positions and compare it the targeted interval
+            diffs.to.aim <- abs((timestamp_num_min[index_tag[k]:index_tag[index_max]] -
+                                   timestamp_num_min[sub.index[length(sub.index)]]) - dtime.aim)
+            # Selection of the closer localisation to dtime.aim (not necessarily k)
+            index_next <- which(diffs.to.aim == min(diffs.to.aim))[1]
+            sub.index[length(sub.index) + 1] <- (index_tag[k:index_max])[index_next]
+          }
+        }
+      }
+    }
+  }
+} 
+  
+# Check if duplicates are present
+  if(anyDuplicated(sub.index) > 0){
+    print("Issue: Subsampling produced duplicates.")
+    data_sub_speed <- data_HF[sub.index,]
+    
+    print(nrow(data_sub_speed%>%
+                 dplyr::group_by(individual.local.identifier, timestamp)%>%
+                 summarise(n = n()) %>%
+                 filter(n>1)%>%
+                 dplyr::ungroup()))
+    
+    data_sub_speed<- data_sub_speed%>%
+      # Retrait des positions dupliquées (date et heure) par individu:
+      dplyr::group_by(individual.local.identifier)%>%
+      dplyr::distinct(timestamp, .keep_all = T) %>%
+      dplyr::ungroup()
+    
+    }else{
+  data_sub_speed <- data_HF[sub.index,]
+  }
+  
+```
+
+#### Verification et écriture csv
+
+```{r}
+diffs_min0 <- diff(as.numeric(data_HF$timestamp)) / 60
+mean(diffs_min0, na.rm = TRUE) # 0.7416683
+diffs_minv <- diff(as.numeric(data_sub_speed$timestamp)) / 60
+mean(diffs_minv, na.rm = TRUE) # 22.77669
+
+# Si c'est ok
+write.table(data_sub_speed,
+            file = paste(here("Alice/STE_data_preparation_June_2026/2.Data_preparation/data_sub_speed_"), Sys.Date(), ".csv", sep = ""),
+            row.names = F, sep = ",")
+
+```
+
+### data_sub_height
+
+#### Subsampling
+
+```{r}
+time_indep_mean_height #  2.880817 min
+attach(data_HF)
+
+# Script Lucile MORCELET 10/04/2026
+# Subsampling GPS tracking at the individual level
+
+# data$timestamp must be formatted as POSIXct object
+# data$Individual_ID is a character or factor.
+
+# Extracting timestamps
+timestamp_num_min <- as.numeric(data_HF$timestamp) / 60
+
+# Delimitation of the subsampling interval : definition of the parameters ----
+  dtime.aim <- time_indep_mean_height # expected sub-sampling frequency (mins)
+  tolerance <- 30/60 # tolerance of 30s (indicated in mins)
+  # positions > (dtime.aim - tolerance) can be selected only if no other localisation are closer to dtime.aim  
+
+  dindex_max <- tolerance * 60 * 2 # assuming minimum time difference of 1 second 
+  sub.index <- NULL # vector to store subsampled localisation index
+
+  
+
+# Subsampling dataset at the level of each individuals -----  
+for(p in unique(data_HF$individual.local.identifier)) {
+  
+  
+  index_tag <- which(data_HF$individual.local.identifier == p) # Vector of index for each localisation
+  sub.index[length(sub.index) + 1] <- index_tag[1] # Always start with the first localisation 
+  
+  if(length(index_tag) > 1){
+    
+    # Check if time lag between k and last selected localisation is within the sub-sampling frequency (i.e., dtime.aim +/- tolerance)
+    for(k in 2:length(index_tag)){
+      # Check if selected localisation is posterior in time
+      if(index_tag[k] > sub.index[length(sub.index)]){
+        
+        # If both localisation are enough distant in time:
+        if(timestamp_num_min[index_tag[k]] -
+           timestamp_num_min[sub.index[length(sub.index)]] > (dtime.aim - tolerance)){
+          
+          # 1) and k is the last localisation : k localisation is selected
+          if(k == length(index_tag)){
+            sub.index[length(sub.index) + 1] <- index_tag[k]
+            
+            # 2) and next localisation after k is enough distant in time : k localisation is selected   
+          } else if((timestamp_num_min[index_tag[k] + 1] -
+                     timestamp_num_min[sub.index[length(sub.index)]]) > (dtime.aim + tolerance)) {
+            sub.index[length(sub.index) + 1] <- index_tag[k]
+            
+            # 3) else look for the next localisation that respect dtime.aim
+          } else {
+            # index_max either based on dtime.aim + tolerance, or last position of tag
+            index_max <- ifelse((k + dindex_max) < length(index_tag), (k + dindex_max), length(index_tag))
+            
+            # Calculate timelag between last selected position and non-subsampled positions and compare it the targeted interval
+            diffs.to.aim <- abs((timestamp_num_min[index_tag[k]:index_tag[index_max]] -
+                                   timestamp_num_min[sub.index[length(sub.index)]]) - dtime.aim)
+            # Selection of the closer localisation to dtime.aim (not necessarily k)
+            index_next <- which(diffs.to.aim == min(diffs.to.aim))[1]
+            sub.index[length(sub.index) + 1] <- (index_tag[k:index_max])[index_next]
+          }
+        }
+      }
+    }
+  }
+}  
+  
+# Check if duplicates are present
+  if(anyDuplicated(sub.index) > 0){
+    print("Issue: Subsampling produced duplicates.")
+    data_sub_speed <- data_HF[sub.index,]
+    
+    print(nrow(data_sub_height%>%
+                 dplyr::group_by(individual.local.identifier, timestamp)%>%
+                 summarise(n = n()) %>%
+                 filter(n>1)%>%
+                 dplyr::ungroup()))
+    
+    data_sub_height<- data_sub_height%>%
+      # Retrait des positions dupliquées (date et heure) par individu:
+      dplyr::group_by(individual.local.identifier)%>%
+      dplyr::distinct(timestamp, .keep_all = T) %>%
+      dplyr::ungroup()
+    
+    }else{
+  data_sub_height <- data_HF[sub.index,]
+  }
+  
+```
+
+#### Verification et écriture csv
+
+```{r}
+# Si c'est ok
+write.table(data_sub_height,
+            file = paste(here("Alice/STE_data_preparation_June_2026/2.Data_preparation/data_sub_height_"), Sys.Date(), ".csv", sep = ""),
+            row.names = F, sep = ",")
+```
+
+### Verif après écriture
+
+```{r}
+# Speed
+data_sub_speed <- read.csv(here("Alice/STE_data_preparation_June_2026/2.Data_preparation/data_sub_speed_2026-11-08.csv"))
+summary(data_sub_speed$ground.speed) # ok
+summary(data_HF$ground.speed) 
+# Height
+data_sub_height <- read.csv(here("Alice/STE_data_preparation_June_2026/2.Data_preparation/data_sub_height_2026-11-08.csv"))
+summary(data_sub_height$height.above.ground_GPS)
+summary(data_HF$height.above.ground_GPS) # Ok
+
+anyDuplicated(data_sub_speed[, c("individual.local.identifier", "timestamp")])
+```
+
+# Alt_gain -\> Découpe à 30min
+
+## Test point par point
+
+```{r}
+#| eval: false
+#| include: false
+# Prendre les tracks de 30min, calculer extrapolation de 1min, 10min etc et voir a quel moment c'est plausible, a partir de quelle durée c'est extrapolable.
+
+
+# 1. Sélection des tracks 30 min : seul HF.ID = 64
+hf_to_keep <- TRACKS_HF_2026_ALL %>%
+  filter(TS >= 29 & TS <= 30) %>%
+  pull(HF.ID) %>%
+  unique()
+hf_to_keep
+
+DATA_HF_filtered <- data_HF %>%
+  filter(HF.ID %in% hf_to_keep)
+
+# 2. Référence : gain total sur 30 min
+alt_gain_30min <- DATA_HF_filtered %>%
+  group_by(HF.ID) %>%
+  summarise(
+    alt_gain_30min = sum(alt_gain, na.rm = TRUE),
+    .groups = "drop"
+  )
+alt_gain_30min
+
+# 3. Création des minutes (time-based, pas index-based)
+minute_gain <- DATA_HF_filtered %>%
+  group_by(HF.ID) %>%
+  arrange(timestamp) %>%
+  mutate(
+    t0 = first(timestamp),
+    minute = floor(as.numeric(difftime(timestamp, t0, units = "mins")))
+  ) %>%
+  ungroup() %>%
+  group_by(HF.ID, minute) %>%
+  summarise(
+    alt_gain_min = sum(alt_gain, na.rm = TRUE),
+    n_points = sum(!is.na(alt_gain)),
+    .groups = "drop"
+  )
+
+# 4. Filtrage simple (optionnel mais recommandé)
+minute_gain <- minute_gain %>%
+  filter(n_points > 5)
+
+# 5. Extrapolation à 30 min
+comparison <- minute_gain %>%
+  mutate(alt_gain_extrapolated = alt_gain_min * 30) %>%
+  left_join(alt_gain_30min, by = "HF.ID") %>%
+  mutate(
+    ratio = alt_gain_extrapolated / alt_gain_30min,
+    error = alt_gain_extrapolated - alt_gain_30min
+  )
+comparison
+
+
+
+
+#################### Version comparaison avec 2min 5min et 10min
+
+# Durées à tester
+durations <- c(1, 2,3,4, 5, 10,20)
+
+# Fonction pour une durée donnée
+compute_extrapolation <- function(d) {
+  
+  DATA_HF_filtered %>%
+    group_by(HF.ID) %>%
+    arrange(timestamp) %>%
+    mutate(
+      t0 = first(timestamp),
+      time_min = as.numeric(difftime(timestamp, t0, units = "mins")),
+      window = floor(time_min / d)
+    ) %>%
+    ungroup() %>%
+    
+    group_by(HF.ID, window) %>%
+    summarise(
+      alt_gain_window = sum(alt_gain, na.rm = TRUE),
+      n_points = sum(!is.na(alt_gain)),
+      .groups = "drop"
+    ) %>%
+    
+    filter(n_points > 5) %>%
+    
+    mutate(
+      duration = d,
+      alt_gain_extrapolated = alt_gain_window * (30 / d)
+    ) %>%
+    
+    left_join(alt_gain_30min, by = "HF.ID") %>%
+    
+    mutate(
+      ratio = alt_gain_extrapolated / alt_gain_30min,
+      error = alt_gain_extrapolated - alt_gain_30min
+    )
+}
+
+# Appliquer à toutes les durées
+comparison_all <- map_dfr(durations, compute_extrapolation)
+comparison_all
+
+# Créer l'erreur en %
+comparison_all <- comparison_all %>%
+  mutate(
+    error_pct = (error / alt_gain_30min) * 100
+  )
+# résumé par durée
+summary_by_duration <- comparison_all %>%
+  group_by(duration) %>%
+  summarise(
+    mean_error_pct = mean(abs(error_pct), na.rm = TRUE),
+    sd_error_pct = sd(error_pct, na.rm = TRUE),
+    mean_ratio = mean(ratio, na.rm = TRUE),
+    n = n()
+  )
+summary_by_duration # => Ca reste des erreurs très grande, on gardera seulement les tracks supérieurs à 5minutes.
+```
+
+## Test track par track avec des moyennes
+
+```{r}
+#| eval: false
+#| include: false
+
+## Boucle
+
+# Référence 1h
+tracks_1h <- TRACKS_HF_2026_ALL %>%
+  filter(TS >= 58 & TS <= 62)
+
+mean_1h <- mean(tracks_1h$alt_gain, na.rm = TRUE)
+
+# Séquence de durées à tester (en minutes)
+durations <- c(1, 2, 5, 10, 15, 20, 30)
+
+results <- lapply(durations, function(d) {
+  
+  tracks <- TRACKS_HF_2026_ALL %>%
+    filter(TS >= d - 0.3 & TS <= d + 0.3)
+  
+  tracks <- tracks %>%
+    mutate(alt_gain_1h = alt_gain * (60 / TS))
+  
+  data.frame(
+    duration = d,
+    n_tracks = nrow(tracks),
+    mean_extrapolated = mean(tracks$alt_gain_1h, na.rm = TRUE),
+    error_percent = (mean(tracks$alt_gain_1h, na.rm = TRUE) - mean_1h) / mean_1h * 100
+  )
+})
+
+results <- bind_rows(results)
+
+print(results)
+# => Enorme pourcentage d'erreur pour toutes les durées de tracks. 1h est peut être trop difficile à extrapoler
+
+
+
+
+##### Track de référence est 30min : extrapolation à 30min des autres ###########################
+
+# Test d'extrapolation de courts vers longs
+tracks_30min <- TRACKS_HF_2026_ALL %>%
+  filter(TS >= 28 & TS <= 32) # = 63 tracks
+
+mean_30min <- mean(tracks_30min$alt_gain, na.rm = TRUE)
+
+# Séquence de durées à tester (en minutes)
+durations <- c(1, 2, 5, 10, 15, 20, 30)
+
+results <- lapply(durations, function(d) {
+  
+  tracks <- TRACKS_HF_2026_ALL %>%
+    filter(TS >= d - 0.3 & TS <= d + 0.3)
+  
+  tracks <- tracks %>%
+    mutate(alt_gain_30min = alt_gain * (30 / TS))
+  
+  data.frame(
+    duration = d,
+    n_tracks = nrow(tracks),
+    mean_extrapolated = mean(tracks$alt_gain_30min, na.rm = TRUE),
+    error_percent = (mean(tracks$alt_gain_30min, na.rm = TRUE) - mean_30min) / mean_30min * 100
+  )
+})
+
+results <- bind_rows(results)
+
+print(results) # Ah c'est déjà beaucoup mieux (Rq : les erreures négatives montrent une sous estimation)
+
+
+#  "Extrapolation" de longs vers courts
+
+# Référence 30 min
+tracks_30min <- TRACKS_HF_2026_ALL %>%
+  filter(TS >= 28 & TS <= 32)
+
+mean_30min <- mean(tracks_30min$alt_gain, na.rm = TRUE)
+mean_30min # 943.1606
+
+# Durées longues uniquement
+durations <- c(40, 60, 90, 120, 180, 300)
+
+results_long <- lapply(durations, function(d) {
+  
+  tracks <- TRACKS_HF_2026_ALL %>%
+    filter(TS >= d - 2 & TS <= d + 2)
+  
+  tracks <- tracks %>%
+    mutate(alt_gain_30min = alt_gain * (30 / TS))
+  
+  data.frame(
+    duration = d,
+    n_tracks = nrow(tracks),
+    mean_scaled = mean(tracks$alt_gain_30min, na.rm = TRUE),
+    error_percent = (mean(tracks$alt_gain_30min, na.rm = TRUE) - mean_30min) / mean_30min * 100
+  )
+})
+
+results_long <- bind_rows(results_long)
+
+print(results_long) # Pas mal de sous estimations...
+# Il faudrais extrapoler les petits mais couper au préalable à 30 minutes.
+
+
+
+
+##############
+
+library(flextable)
+library(officer)
+library(dplyr)
+
+# --- Recalcul des trois tableaux (pour être sûr d'avoir les bons objets) ---
+
+# 1) Référence 1h
+tracks_1h <- TRACKS_HF_2026_ALL %>% filter(TS >= 58 & TS <= 62)
+mean_1h <- mean(tracks_1h$alt_gain, na.rm = TRUE)
+
+durations <- c(1, 2, 5, 10, 15, 20, 30)
+results_1h <- lapply(durations, function(d) {
+  tracks <- TRACKS_HF_2026_ALL %>% filter(TS >= d - 0.3 & TS <= d + 0.3)
+  tracks <- tracks %>% mutate(alt_gain_1h = alt_gain * (60 / TS))
+  data.frame(
+    duration = d,
+    n_tracks = nrow(tracks),
+    mean_extrapolated = mean(tracks$alt_gain_1h, na.rm = TRUE),
+    error_percent = (mean(tracks$alt_gain_1h, na.rm = TRUE) - mean_1h) / mean_1h * 100
+  )
+})
+results_1h <- bind_rows(results_1h)
+
+# 2) Référence 30 min (court -> long)
+tracks_30min <- TRACKS_HF_2026_ALL %>% filter(TS >= 28 & TS <= 32)
+mean_30min <- mean(tracks_30min$alt_gain, na.rm = TRUE)
+
+results_30min <- lapply(durations, function(d) {
+  tracks <- TRACKS_HF_2026_ALL %>% filter(TS >= d - 0.3 & TS <= d + 0.3)
+  tracks <- tracks %>% mutate(alt_gain_30min = alt_gain * (30 / TS))
+  data.frame(
+    duration = d,
+    n_tracks = nrow(tracks),
+    mean_extrapolated = mean(tracks$alt_gain_30min, na.rm = TRUE),
+    error_percent = (mean(tracks$alt_gain_30min, na.rm = TRUE) - mean_30min) / mean_30min * 100
+  )
+})
+results_30min <- bind_rows(results_30min)
+
+# 3) Référence 30 min (long -> court)
+durations_long <- c(40, 60, 90, 120, 180, 300)
+results_long <- lapply(durations_long, function(d) {
+  tracks <- TRACKS_HF_2026_ALL %>% filter(TS >= d - 2 & TS <= d + 2)
+  tracks <- tracks %>% mutate(alt_gain_30min = alt_gain * (30 / TS))
+  data.frame(
+    duration = d,
+    n_tracks = nrow(tracks),
+    mean_scaled = mean(tracks$alt_gain_30min, na.rm = TRUE),
+    error_percent = (mean(tracks$alt_gain_30min, na.rm = TRUE) - mean_30min) / mean_30min * 100
+  )
+})
+results_long <- bind_rows(results_long)
+
+# --- Fonction utilitaire pour formatter un flextable rapidement ---
+make_ft <- function(df, digits = 2) {
+  ft <- flextable(df)
+  ft <- colformat_double(ft, digits = digits)
+  ft <- autofit(ft)
+  ft <- theme_vanilla(ft)
+  ft
+}
+
+# --- Construction du document Word ---
+doc <- read_docx()
+
+doc <- body_add_par(doc, "Extrapolation test: reference duration = 1h", style = "heading 1")
+doc <- body_add_par(doc, "Large error percentages across all tested durations suggest 1h is too difficult to extrapolate reliably.", style = "Normal")
+doc <- body_add_flextable(doc, value = make_ft(results_1h))
+
+doc <- body_add_par(doc, "Extrapolation test: reference duration = 30 min (short -> long)", style = "heading 1")
+doc <- body_add_par(doc, "Error percentages are substantially reduced compared to the 1h reference. Negative errors indicate underestimation.", style = "Normal")
+doc <- body_add_flextable(doc, value = make_ft(results_30min))
+
+doc <- body_add_par(doc, "Extrapolation test: reference duration = 30 min (long -> short)", style = "heading 1")
+doc <- body_add_par(doc, "Notable underestimation observed when scaling down from long-duration tracks.", style = "Normal")
+doc <- body_add_flextable(doc, value = make_ft(results_long))
+
+print(doc, target = "C:/Users/alrodrigues/Documents/M2 AMU/STAGE M2/Figures/table_extrapolation_alt_gain.docx")
+```
+
+## Découpe à 30min
+
+```{r}
+# ===============================================================================================
+# Découpe des segments HF
+
+# Créer les segment_globals à partir du temps
+# Etape 1
+max_TS <- 30 # 30 minutes
+
+data_HF$segment <- NA
+
+for(id in unique(data_HF$HF.ID)){
+  
+  index <- which(data_HF$HF.ID == id)
+  
+  cum_time <- cumsum(data_HF$dtime_orig[index])
+  
+  data_HF$segment[index] <- floor(cum_time / max_TS)
+}
+
+# Etape 2
+data_HF$HF_ID_seg <- paste(data_HF$HF.ID, data_HF$segment, sep = "_")
+str(data_HF)
+
+# Déjà calculé segment local
+data_HF$HF_ID_seg <- paste(data_HF$HF.ID, data_HF$segment, sep = "_")
+
+# numéro global unique par segment découpé
+segments_unique <- unique(data_HF$HF_ID_seg)
+segment_global <- seq_along(segments_unique)
+
+# créer une nouvelle colonne segment_global
+data_HF$segment_global <- match(data_HF$HF_ID_seg, segments_unique)
+
+# vérifier
+head(data_HF[, c("HF.ID", "segment", "HF_ID_seg", "segment_global")])
+length(unique(data_HF$segment_global)) # doit être égal au nombre total de segments découpés
+
+
+# ===========================================================================================
+# Etape 3 : Calculs des métriques sur les segments au lieu de sur les ID.HF
+
+
+# Prepare HF track table ####
+
+ID_switch <- c(1, which(data_HF$segment_global[2:nrow(data_HF)] != data_HF$segment_global[1:(nrow(data_HF)-1)]) + 1)
+
+colnames(data_HF)
+colnames(ov_days)
+ov_HF_tracks <- data_HF[ID_switch, c("segment_global", "individual.local.identifier",               # Ici regroupement par tracks de HF à partir de segment_global
+                                     "tag.local.identifier", "individual.sex",
+                                     "age_CY", "age_year", "timestamp")]
+
+colnames(ov_HF_tracks)[which(colnames(ov_HF_tracks) == "individual.sex")] <- "sex"
+colnames(ov_HF_tracks)[which(colnames(ov_HF_tracks) == "timestamp")] <- "timestamp_start"
+
+
+# Add basic information ####
+
+ov_HF_tracks$timestamp_end <- data_HF$timestamp[c(ID_switch[-1]-1, nrow(data_HF))]
+ov_HF_tracks$date <- substr(ov_HF_tracks$timestamp_start,1,10)
+
+ov_HF_tracks$bird_day <- paste(ov_HF_tracks$individual.local.identifier, ov_HF_tracks$date)
+
+# n fixes
+n_fixes_tab <- summary(factor(data_HF$segment_global), maxsum = 5000)
+n_fixes_tab <- data.frame(segment_global = names(n_fixes_tab), n_fixes = n_fixes_tab)
+ov_HF_tracks <- merge(ov_HF_tracks, n_fixes_tab, "segment_global", all.x = T)
+summary(ov_HF_tracks$n_fixes) # Up to 11k
+
+data_HF_move <- data_HF[which(data_HF$move == "move"),]
+n_fixes_move_tab <- summary(factor(data_HF_move$segment_global), maxsum = 5000)
+n_fixes_move_tab <- data.frame(segment_global = names(n_fixes_move_tab), n_fixes_move = n_fixes_move_tab)
+ov_HF_tracks <- merge(ov_HF_tracks, n_fixes_move_tab, "segment_global", all.x = T)
+ov_HF_tracks$n_fixes_move[is.na(ov_HF_tracks$n_fixes_move)] <- 0
+summary(ov_HF_tracks$n_fixes_move) # Up to 7.7k
+
+data_HF_sit <- data_HF[which(data_HF$move == "sit"),]
+n_fixes_sit_tab <- summary(factor(data_HF_sit$segment_global), maxsum = 5000)
+n_fixes_sit_tab <- data.frame(segment_global = names(n_fixes_sit_tab), n_fixes_sit = n_fixes_sit_tab)
+ov_HF_tracks <- merge(ov_HF_tracks, n_fixes_sit_tab, "segment_global", all.x = T)
+ov_HF_tracks$n_fixes_sit[is.na(ov_HF_tracks$n_fixes_sit)] <- 0
+summary(ov_HF_tracks$n_fixes_sit) # Up to 7.8k
+
+data_HF_move_2 <- data_HF[which(data_HF$move_2 == "move"),]
+n_fixes_move_2_tab <- summary(factor(data_HF_move_2$segment_global), maxsum = 5000)
+n_fixes_move_2_tab <- data.frame(segment_global = names(n_fixes_move_2_tab), n_fixes_move_2 = n_fixes_move_2_tab)
+ov_HF_tracks <- merge(ov_HF_tracks, n_fixes_move_2_tab, "segment_global", all.x = T)
+ov_HF_tracks$n_fixes_move_2[is.na(ov_HF_tracks$n_fixes_move_2)] <- 0
+summary(ov_HF_tracks$n_fixes_move_2) # Up to 8.4k
+
+data_HF_sit_2 <- data_HF[which(data_HF$move_2 == "sit"),]
+n_fixes_sit_2_tab <- summary(factor(data_HF_sit_2$segment_global), maxsum = 5000)
+n_fixes_sit_2_tab <- data.frame(segment_global = names(n_fixes_sit_2_tab), n_fixes_sit_2 = n_fixes_sit_2_tab)
+ov_HF_tracks <- merge(ov_HF_tracks, n_fixes_sit_2_tab, "segment_global", all.x = T)
+ov_HF_tracks$n_fixes_sit_2[is.na(ov_HF_tracks$n_fixes_sit_2)] <- 0
+summary(ov_HF_tracks$n_fixes_sit_2) # Up to 7.2k
+
+all(ov_HF_tracks$n_fixes_move + ov_HF_tracks$n_fixes_sit == ov_HF_tracks$n_fixes)
+all(ov_HF_tracks$n_fixes_move_2 + ov_HF_tracks$n_fixes_sit_2 == ov_HF_tracks$n_fixes)
+
+# Proportion in flight
+ov_HF_tracks$prop_move <- ov_HF_tracks$n_fixes_move_2/ov_HF_tracks$n_fixes
+
+summary(ov_HF_tracks$prop_move)
+hist(ov_HF_tracks$prop_move)
+# Wow, many with only flight positions!
+# View(ov_HF_tracks[ov_HF_tracks$prop_move == 1,])
+# summary(factor(ov_HF_tracks$countries[ov_HF_tracks$prop_move == 1]))
+
+
+# Time span
+TS_tab <- tapply(data_HF$dtime_orig, factor(data_HF$segment_global), sum, na.rm = T)
+TS_tab <- data.frame(segment_global = names(TS_tab), TS = TS_tab)
+ov_HF_tracks <- merge(ov_HF_tracks, TS_tab, "segment_global", all.x = T)
+summary(ov_HF_tracks$TS)
+sum(ov_HF_tracks$TS) / 60 # 1441 h
+
+TS_move_tab <- tapply(data_HF_move_2$dtime_orig, factor(data_HF_move_2$segment_global), sum, na.rm = T)
+TS_move_tab <- data.frame(segment_global = names(TS_move_tab), TS_move = TS_move_tab)
+ov_HF_tracks <- merge(ov_HF_tracks, TS_move_tab, "segment_global", all.x = T)
+summary(ov_HF_tracks$TS_move)
+ov_HF_tracks$TS_move[is.na(ov_HF_tracks$TS_move)] <- 0
+summary(ov_HF_tracks$TS_move)
+sum(ov_HF_tracks$TS_move) / 60 # 921 h                                          
+
+
+# Distance between first and last position ####
+
+ov_HF_tracks$first_lat <- data_HF$location.lat[ID_switch]
+ov_HF_tracks$first_lon <- data_HF$location.lon[ID_switch]
+ov_HF_tracks$last_lat <- data_HF$location.lat[c(ID_switch[-1]-1, nrow(data_HF))]
+ov_HF_tracks$last_lon <- data_HF$location.lon[c(ID_switch[-1]-1, nrow(data_HF))]
+
+ID <- "1"
+index <- which(data_HF$segment_global == ID)
+plot(data_HF$location.lat[index] ~ data_HF$location.long[index], type = "l", xlab = "Longitude", ylab = "Latitude",
+     main = ID)
+index <- which(ov_HF_tracks$segment_global == ID)
+lines(c(ov_HF_tracks$first_lon[index], ov_HF_tracks$last_lon[index]),
+      c(ov_HF_tracks$first_lat[index], ov_HF_tracks$last_lat[index]), col = "red")
+
+# Distance between first and last fix
+
+longlat_first <- cbind(ov_HF_tracks$first_lon, ov_HF_tracks$first_lat)
+coord_first <- SpatialPoints(longlat_first, proj4string=CRS("EPSG:4326"))
+longlat_last <- cbind(ov_HF_tracks$last_lon, ov_HF_tracks$last_lat)
+coord_last <- SpatialPoints(longlat_last, proj4string=CRS("EPSG:4326"))
+
+ov_HF_tracks$dist_first_last <- NA
+ov_HF_tracks$dist_first_last <- distGeo(p1 = coord_first, p2 = coord_last)/1000 # in km
+summary(ov_HF_tracks$dist_first_last) # Max. 135
+
+
+# Cumulative distance ####
+# Sum of segment_global distances
+
+# Re-calculate 2D delta distance for subsampled data (meters)
+longlat <- cbind(data_HF$location.long[2:nrow(data_HF)], data_HF$location.lat[2:nrow(data_HF)])
+coord <- SpatialPoints(longlat, proj4string=CRS("EPSG:4326"))
+longlat_min1 <- cbind(data_HF$location.long[1:(nrow(data_HF)-1)], data_HF$location.lat[1:(nrow(data_HF)-1)])
+coord_min1 <- SpatialPoints(longlat_min1, proj4string=CRS("EPSG:4326"))
+
+data_HF$ddist_2D <- c(NA, distGeo(p1 = coord, p2 = coord_min1)) # in m
+index_ID.switch <- which(data_HF$segment_global[2:nrow(data_HF)] != data_HF$segment_global[1:(nrow(data_HF)-1)]) + 1
+if(length(index_ID.switch) != 0){data_HF$ddist_2D[index_ID.switch] <- NA}
+hist(data_HF$ddist_2D)
+summary(data_HF$ddist_2D)
+
+cum_dist_tab <- tapply(data_HF$ddist_2D, factor(data_HF$segment_global), sum, na.rm = T) / 1000 # In km
+cum_dist_tab <- data.frame(segment_global = names(cum_dist_tab), cum_dist = cum_dist_tab)
+ov_HF_tracks <- merge(ov_HF_tracks, cum_dist_tab, "segment_global", all.x = T)
+summary(ov_HF_tracks$cum_dist) # Max. 185 km
+hist(ov_HF_tracks$cum_dist)
+
+plot(ov_HF_tracks$cum_dist ~ ov_HF_tracks$dist_first_last)
+abline(0,1)
+
+rm(longlat, coord, longlat_min1, coord_min1,
+   index_ID.switch, cum_dist_tab, index_ID.switch)
+
+
+# Add country names ####
+
+ov_HF_tracks$countries <- NA
+start.time <- Sys.time()
+for(i in 1:nrow(ov_HF_tracks)){
+  index <- which(data_HF$segment_global == ov_HF_tracks$segment_global[i])
+  ov_HF_tracks$countries[i] <- paste(unique(data_HF$country[index]), collapse = ", ")
+}
+delta.time <- Sys.time() - start.time; delta.time # 20 s
+summary(factor(ov_HF_tracks$countries))
+
+rm(start.time, delta.time, i, index)
+
+
+# Add latitudinal/longitudinal difference ####
+# Based on first and last coordinates
+
+ov_HF_tracks$lat_diff <- ov_HF_tracks$last_lat - ov_HF_tracks$first_lat
+hist(ov_HF_tracks$lat_diff)
+summary(ov_HF_tracks$lat_diff)
+ov_HF_tracks$lon_diff <- ov_HF_tracks$last_lon - ov_HF_tracks$first_lon
+hist(ov_HF_tracks$lon_diff)
+summary(ov_HF_tracks$lon_diff)
+
+# Mean lat/lon
+ov_HF_tracks$lat_mean <- (ov_HF_tracks$last_lat + ov_HF_tracks$first_lat)/2
+hist(ov_HF_tracks$lat_mean)
+summary(ov_HF_tracks$lat_mean)
+ov_HF_tracks$lon_mean <- (ov_HF_tracks$last_lon + ov_HF_tracks$first_lon)/2
+hist(ov_HF_tracks$lon_mean)
+summary(ov_HF_tracks$lon_mean)
+
+
+# Proportion over sea ####
+
+summary(factor(data_HF$over_sea))
+
+prop_1 <- function(vec){
+  x <- length(which(vec == "1")) / length(vec)
+  return(x)
+}
+
+prop_over_sea_tab <- tapply(data_HF$over_sea, factor(data_HF$segment_global), prop_1)
+prop_over_sea_tab <- data.frame(segment_global = names(prop_over_sea_tab), prop_over_sea = prop_over_sea_tab)
+ov_HF_tracks <- merge(ov_HF_tracks, prop_over_sea_tab, "segment_global", all.x = T)
+
+summary(ov_HF_tracks$prop_over_sea)
+hist(ov_HF_tracks$prop_over_sea)
+length(which(ov_HF_tracks$prop_over_sea > 0)) # 30 tracks only!
+# View(ov_HF_tracks[which(ov_HF_tracks$prop_over_sea > 0),])
+
+length(which(is.na(ov_HF_tracks$prop_over_sea))) # 40 days
+
+
+# Average speed ####
+# Based on GPS speed
+
+summary(data_HF_move_2$ground.speed)
+
+speed_GPS_median_tab <- tapply(data_HF_move_2$ground.speed, factor(data_HF_move_2$segment_global), median)
+speed_GPS_median_tab <- data.frame(segment_global = names(speed_GPS_median_tab), speed_GPS_median = speed_GPS_median_tab)
+ov_HF_tracks <- merge(ov_HF_tracks, speed_GPS_median_tab, "segment_global", all.x = T)
+summary(ov_HF_tracks$speed_GPS_median)
+hist(ov_HF_tracks$speed_GPS_median)
+length(which(is.na(ov_HF_tracks$speed_GPS_median))) # 227 NA's
+# Where do NA's come from?!
+# View(ov_HF_tracks[is.na(ov_HF_tracks$speed_GPS_median),])
+unique(ov_HF_tracks$n_fixes_move_2[is.na(ov_HF_tracks$speed_GPS_median)])
+# Tracks without in-flight positions!
+
+rm(speed_GPS_median_tab)
+
+
+# Flight height parameters ####
+
+# Remove very bad outliers?
+# No, leave for now.
+summary(data_HF$height.above.ground_GPS) # 66 NA's
+# sort(data_HF$height.above.ground_GPS)[1:100]
+# sort(data_HF$height.above.ground_GPS, decreasing = T)[1:100]
+# length(which(data_HF$height.above.ground_GPS < -100)) # 29
+# 
+# data_HF$height.above.ground_GPS_clean <-
+#   ifelse(data_HF$height.above.ground_GPS > -100, data_HF$height.above.ground_GPS, NA)
+# summary(data_HF$height.above.ground_GPS_clean)
+# data_HF$height.above.msl_GPS_clean <-
+#   ifelse(data_HF$height.above.ground_GPS > -100, data_HF$height.above.ground_GPS, NA)
+# summary(data_HF$height.above.msl_GPS)
+
+# First: Number of in-flight fixes with height data
+data_HF_move_2_no.na <- data_HF[which(data_HF$move_2 == "move" & !(is.na(data_HF$height.above.ground_GPS))),]
+n_fixes_move_2_no.na_tab <- summary(factor(data_HF_move_2_no.na$segment_global), maxsum = 5000)
+n_fixes_move_2_no.na_tab <- data.frame(segment_global = names(n_fixes_move_2_no.na_tab), n_fixes_move_2_no.na = n_fixes_move_2_no.na_tab)
+ov_HF_tracks <- merge(ov_HF_tracks, n_fixes_move_2_no.na_tab, "segment_global", all.x = T)
+ov_HF_tracks$n_fixes_move_2_no.na[is.na(ov_HF_tracks$n_fixes_move_2_no.na)] <- 0
+summary(ov_HF_tracks$n_fixes_move_2_no.na) # Up to 8.4k
+summary(ov_HF_tracks$n_fixes_move_2 - ov_HF_tracks$n_fixes_move_2_no.na)
+
+height.above.ground_GPS_median_tab <- tapply(data_HF_move_2$height.above.ground_GPS, factor(data_HF_move_2$segment_global), median, na.rm = T)
+height.above.ground_GPS_median_tab <- data.frame(segment_global = names(height.above.ground_GPS_median_tab), height.above.ground_GPS_median = height.above.ground_GPS_median_tab)
+ov_HF_tracks <- merge(ov_HF_tracks, height.above.ground_GPS_median_tab, "segment_global", all.x = T)
+length(which(is.na(ov_HF_tracks$height.above.ground_GPS_median))) # 227
+summary(ov_HF_tracks$height.above.ground_GPS_median)
+hist(ov_HF_tracks$height.above.ground_GPS_median)
+
+height.above.ground_GPS_min_tab <- tapply(data_HF_move_2$height.above.ground_GPS, factor(data_HF_move_2$segment_global), min, na.rm = T)
+height.above.ground_GPS_min_tab <- data.frame(segment_global = names(height.above.ground_GPS_min_tab), height.above.ground_GPS_min = height.above.ground_GPS_min_tab)
+ov_HF_tracks <- merge(ov_HF_tracks, height.above.ground_GPS_min_tab, "segment_global", all.x = T)
+length(which(is.na(ov_HF_tracks$height.above.ground_GPS_min))) # 227
+summary(ov_HF_tracks$height.above.ground_GPS_min)
+hist(ov_HF_tracks$height.above.ground_GPS_min)
+
+height.above.ground_GPS_max_tab <- tapply(data_HF_move_2$height.above.ground_GPS, factor(data_HF_move_2$segment_global), max, na.rm = T)
+height.above.ground_GPS_max_tab <- data.frame(segment_global = names(height.above.ground_GPS_max_tab), height.above.ground_GPS_max = height.above.ground_GPS_max_tab)
+ov_HF_tracks <- merge(ov_HF_tracks, height.above.ground_GPS_max_tab, "segment_global", all.x = T)
+length(which(is.na(ov_HF_tracks$height.above.ground_GPS_max))) # 227
+summary(ov_HF_tracks$height.above.ground_GPS_max)
+hist(ov_HF_tracks$height.above.ground_GPS_max)
+
+height.above.ground_GPS_q1_tab <- tapply(data_HF_move_2$height.above.ground_GPS, factor(data_HF_move_2$segment_global), quantile, 0.01, na.rm = T)
+height.above.ground_GPS_q1_tab <- data.frame(segment_global = names(height.above.ground_GPS_q1_tab), height.above.ground_GPS_q1 = height.above.ground_GPS_q1_tab)
+ov_HF_tracks <- merge(ov_HF_tracks, height.above.ground_GPS_q1_tab, "segment_global", all.x = T)
+length(which(is.na(ov_HF_tracks$height.above.ground_GPS_q1))) # 227
+summary(ov_HF_tracks$height.above.ground_GPS_q1)
+hist(ov_HF_tracks$height.above.ground_GPS_q1)
+
+height.above.ground_GPS_q99_tab <- tapply(data_HF_move_2$height.above.ground_GPS, factor(data_HF_move_2$segment_global), quantile, 0.99, na.rm = T)
+height.above.ground_GPS_q99_tab <- data.frame(segment_global = names(height.above.ground_GPS_q99_tab), height.above.ground_GPS_q99 = height.above.ground_GPS_q99_tab)
+ov_HF_tracks <- merge(ov_HF_tracks, height.above.ground_GPS_q99_tab, "segment_global", all.x = T)
+length(which(is.na(ov_HF_tracks$height.above.ground_GPS_q99))) # 227
+summary(ov_HF_tracks$height.above.ground_GPS_q99)
+hist(ov_HF_tracks$height.above.ground_GPS_q99)
+
+rm(height.above.ground_GPS_median_tab, height.above.ground_GPS_min_tab,
+   height.above.ground_GPS_max_tab, height.above.ground_GPS_q1_tab,
+   height.above.ground_GPS_q99_tab)
+
+# Altitude gain
+alt_gain_tab <- tapply(data_HF_move_2$alt_gain, factor(data_HF_move_2$segment_global), sum, na.rm = T)
+alt_gain_tab <- data.frame(segment_global = names(alt_gain_tab), alt_gain = alt_gain_tab)
+ov_HF_tracks <- merge(ov_HF_tracks, alt_gain_tab, "segment_global", all.x = T)
+length(which(is.na(ov_HF_tracks$alt_gain))) # 227
+
+summary(ov_HF_tracks$alt_gain) # Max. 17.8
+hist(ov_HF_tracks$alt_gain)
+
+hist(ov_HF_tracks$alt_gain/ov_HF_tracks$n_fixes_move_2)
+hist(ov_HF_tracks$alt_gain/ov_HF_tracks$TS_move)
+plot(ov_HF_tracks$alt_gain ~ ov_HF_tracks$TS_move, xlab = "Timespan of in-flight HF data (min)",
+     ylab = "Altitude gain within HF data (m)", xaxs = "i", yaxs = "i", xpd = NA,
+     main = "STE altitude gain")
+
+# View(ov_HF_tracks[which(ov_HF_tracks$alt_gain/ov_HF_tracks$TS_move > 100),])
+# All with quite short HF periods (6-7 min)
+
+ID <- 1
+index <- which(data_HF_move_2$segment_global ==
+                 ov_HF_tracks$segment_global[which(ov_HF_tracks$alt_gain/ov_HF_tracks$TS_move > 50)][ID]) # Forcément pas beaucoup car découpés 
+index
+plot(data_HF_move_2$height.above.msl_GPS[index] ~ data_HF_move_2$timestamp[index])
+sum(data_HF_move_2$dheight_pm[index][which(data_HF_move_2$dheight_pm[index] > 0)])
+
+# -> Unrelated to height outliers! Instead, HF mainly collected during ascents!
+# Solution for analysis: Remove days with unsufficient TS of HF data...
+
+rm(ID, index, alt_gain_tab, alt_gain, index_ID.switch)
+
+
+# Ground level parameters ####
+
+summary(data_HF$ground.level_srtm) # Max. 3652 m!
+
+ground.level_srtm_median_tab <- tapply(data_HF$ground.level_srtm, factor(data_HF$segment_global), median, na.rm = T)
+ground.level_srtm_median_tab <- data.frame(segment_global = names(ground.level_srtm_median_tab), ground.level_srtm_median = ground.level_srtm_median_tab)
+ov_HF_tracks <- merge(ov_HF_tracks, ground.level_srtm_median_tab, "segment_global", all.x = T)
+length(which(is.na(ov_HF_tracks$ground.level_srtm_median)))
+summary(ov_HF_tracks$ground.level_srtm_median)
+hist(ov_HF_tracks$ground.level_srtm_median)
+
+ground.level_srtm_min_tab <- tapply(data_HF$ground.level_srtm, factor(data_HF$segment_global), min, na.rm = T)
+ground.level_srtm_min_tab <- data.frame(segment_global = names(ground.level_srtm_min_tab), ground.level_srtm_min = ground.level_srtm_min_tab)
+ov_HF_tracks <- merge(ov_HF_tracks, ground.level_srtm_min_tab, "segment_global", all.x = T)
+length(which(is.na(ov_HF_tracks$ground.level_srtm_min)))
+summary(ov_HF_tracks$ground.level_srtm_min)
+hist(ov_HF_tracks$ground.level_srtm_min)
+
+ground.level_srtm_max_tab <- tapply(data_HF$ground.level_srtm, factor(data_HF$segment_global), max, na.rm = T)
+ground.level_srtm_max_tab <- data.frame(segment_global = names(ground.level_srtm_max_tab), ground.level_srtm_max = ground.level_srtm_max_tab)
+ov_HF_tracks <- merge(ov_HF_tracks, ground.level_srtm_max_tab, "segment_global", all.x = T)
+length(which(is.na(ov_HF_tracks$ground.level_srtm_max)))
+summary(ov_HF_tracks$ground.level_srtm_max)
+hist(ov_HF_tracks$ground.level_srtm_max)
+
+
+# Check sorting ####
+# Modified through merge()?
+
+all(rownames(ov_HF_tracks) == 1:nrow(ov_HF_tracks)) # T
+
+
+# Re-arrange columns ####
+
+colnames(ov_HF_tracks)
+# colnames_rm <- c("date_num_rnd", "segment_global_2", "year.1st.depl", "age.1st.depl")
+# ov_HF_tracks <- ov_HF_tracks[,-which(colnames(ov_HF_tracks) %in% colnames_rm)]
+# 
+# colnames(ov_HF_tracks)
+# col_index_sort <- c(1:3,39,36:38,40,4,20,5:17,19,18,21:24,
+#                     26,25,27,34,35,28:33)
+# length(col_index_sort); length(unique(col_index_sort))
+# which(!(1:ncol(ov_HF_tracks) %in% col_index_sort))
+# ov_HF_tracks <- ov_HF_tracks[,col_index_sort]
+# 
+# summary(ov_HF_tracks)
+
+
+
+### Vérification
+
+hist(ov_HF_tracks$TS)
+#table(ov_HF_tracks$TS)
+
+# Vérif des latitudes pour chaque ligne de ov_HF_tracks
+sum(is.na(ov_HF_tracks$first_lat))   # nombre de segments sans first_lat
+sum(is.na(ov_HF_tracks$last_lat))    # nombre de segments sans last_lat
+
+# Optionnel : voir les lignes qui posent problème
+#ov_HF_tracks[is.na(ov_HF_tracks$first_lat) | is.na(ov_HF_tracks$last_lat), ]
+# => Aucun NA dans les first_lat / last_lat ; first_lon / last_lon
+
+
+
+# Export output ####
+OV_HF_tracks_ALT <- ov_HF_tracks
+
+save(OV_HF_tracks_ALT, file = paste(here("Alice/STE_data_preparation_June_2026/2.Data_preparation/2.5_OUTPUT_STE_France_HF_track_table_ALT_"), Sys.Date(), ".RData", sep = ""))
+
+```
+
+## Extrapolation à 30min et retrait TS\<=5min
+
+```{r}
+# Tracks ALT
+load(here("Alice/STE_data_preparation_June_2026/2.Data_preparation/2.5_OUTPUT_STE_France_HF_track_table_ALT_2026-11-08.RData"))
+
+# Extrapolation
+OV_HF_tracks_ALT <- OV_HF_tracks_ALT %>%
+  mutate(
+    alt_gain_30min = alt_gain * (30 / TS)
+  )
+plot(alt_gain_30min~TS, data=OV_HF_tracks_ALT)
+
+library(ggplot2)
+library(hexbin)
+
+extrap_alt_gain <- ggplot(OV_HF_tracks_ALT,
+       aes(x = TS, y = alt_gain_30min)) +
+  geom_hex(bins = 40) +
+  scale_fill_viridis_c(name = "Number\nof segments") +
+  labs(
+    x = "Segment duration (min)",
+    y = "Altitude gain extrapolated to 30 min (m)"
+  ) +
+  theme_classic(base_size = 14)
+
+ggsave(
+  filename = here("Figures/ANNEXES/extrap_alt_gain.png"),
+  plot = extrap_alt_gain,
+  width = 7, height = 5, dpi = 300
+)
+
+
+
+# Enlever les TS <= 5min car trop peu précis
+OV_HF_tracks_ALT <- OV_HF_tracks_ALT %>%
+  filter(TS > 5)
+table(OV_HF_tracks_ALT$TS <= 5) # 5653 FALSE OK
+
+extrap_alt_gain_5min <- ggplot(OV_HF_tracks_ALT,
+       aes(x = TS, y = alt_gain_30min)) +
+  geom_hex(bins = 40) +
+  scale_fill_viridis_c(name = "Number\nof segments") +
+  labs(
+    x = "Segment duration (min)",
+    y = "Altitude gain extrapolated to 30 min (m)"
+  ) +
+  theme_classic(base_size = 14)
+
+ggsave(
+  filename = here("Figures/ANNEXES/extrap_alt_gain_5min.png"),
+  plot = extrap_alt_gain_5min,
+  width = 7, height = 5, dpi = 300
+)
+```
+
+## Ecriture csv
+
+```{r}
+# Ecriture du csv
+write.table(OV_HF_tracks_ALT,
+            file = paste(here("Alice/STE_data_preparation_June_2026/2.Data_preparation/2.5_OUTPUT_STE_France_HF_track_table_ALT_"), Sys.Date(), ".csv", sep = ""),
+            row.names = F, sep = ",")
+```
+
+## Vérifications après ecriture
+
+```{r}
+# TRACKS HF ALT
+TRACKS_HF_2026_ALT <- read.csv(here("Alice/STE_data_preparation_June_2026/2.Data_preparation/2.5_OUTPUT_STE_France_HF_track_table_ALT_2026-11-08.csv"))
+
+plot(alt_gain_30min ~ TS, data = TRACKS_HF_2026_ALT)
+str(TRACKS_HF_2026_ALT)
+```
+
+# Proportion de HF par ID
+
+```{r}
+# Tous les points HF et BF : 1 ligne = 1 point
+load(here("Alice/STE_data_preparation_June_2026/2.Data_preparation/2.1_OUTPUT_STE_France_processed_all_A_2026-11-08.RData"))
+# data
+
+library(dplyr)
+conflicts_prefer(dplyr::lag)
+
+res <- data %>%
+  arrange(individual.local.identifier, timestamp) %>%
+  group_by(individual.local.identifier) %>%
+  mutate(
+    dt = as.numeric(difftime(timestamp, lag(timestamp), units = "secs")),
+    hf = ifelse(dt == 3, 1, 0)
+  ) %>%
+  summarise(
+    prop_HF = mean(hf, na.rm = TRUE),
+    n = n()
+  )
+res
+
+library(flextable)
+library(officer)
+
+# Mise en forme du tableau
+ft <- flextable(res)
+ft <- set_header_labels(ft,
+  individual.local.identifier = "Individual ID",
+  prop_HF = "Proportion HF",
+  n = "N points"
+)
+ft <- colformat_double(ft, j = "prop_HF", digits = 3)
+ft <- autofit(ft)
+ft <- theme_vanilla(ft)  # ou theme_box(), selon ton style habituel
+
+# Création du document Word et insertion du tableau
+doc <- read_docx()
+doc <- body_add_par(doc, "Proportion of high-frequency (HF) GPS points per individual", style = "heading 1")
+doc <- body_add_flextable(doc, value = ft)
+
+#print(doc, target = "C:/Users/alrodrigues/Documents/M2 AMU/STAGE M2/Figures/table_prop_HF_per_individual.docx")
+```
