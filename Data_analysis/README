@@ -1,0 +1,6 @@
+Data analysis
+- Migration route efficiency (Tortuosity, Duration, Distance)
+- Flight performances (ground speed, height above ground level, 30 min altitude gain)
+- Use of thermal updrafts (Nb of thermals/hr, Thermal duration, Altitude gain per thermal)
+- Flight type (Gliding/thermalling) -> Cross Country Optimisation Strategy on python
+
