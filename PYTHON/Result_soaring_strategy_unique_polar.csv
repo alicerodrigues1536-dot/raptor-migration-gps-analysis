@@ -1,0 +1,2 @@
+Species,a_mean,b_mean,c_mean,x_best_glide_mean,y_best_glide_mean,best_glide_ratio_mean,x_min_sink_mean,y_min_sink_mean,a_linear,b_linear,min_sink_in_range,best_glide_in_range
+Circaetus gallicus,-0.007629493,0.056171365,-0.907560296,10.90661331,-1.202481236,9.070090227,3.681199246,-0.804171303,3.888284544,11.38544672,FALSE,TRUE
