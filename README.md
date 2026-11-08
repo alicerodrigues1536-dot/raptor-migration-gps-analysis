@@ -1,4 +1,4 @@
-# Short-toed Snake Eagle: flight behaviour and migration
+# raptor-migration-gps-analysis
 
 Analysis of GPS tracking data from Short-toed Snake Eagles (*Circaetus gallicus*) during migration (R, Python, Quarto).
 
