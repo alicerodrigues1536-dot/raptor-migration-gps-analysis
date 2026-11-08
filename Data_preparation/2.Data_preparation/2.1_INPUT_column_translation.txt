@@ -1,0 +1,53 @@
+Milsar	Ornitela	Ornitela_V2	UvA-BiTS	Movebank	Movebank alternative
+Device.ID	device_id	device_id	device_info_serial	tag.local.identifier	
+Year					
+Month					
+Day					
+Hour					
+Minute					
+Second					
+Milisecond					
+CPU.temperature.C.					
+Pressure.mbar.			pressure	bar.barometric.pressure	
+Temperature.sensor.C.	temperature_C	temperature_C	temperature	external.temperature	
+	acc_x	acc_x		acceleration.raw.x	
+	acc_y	acc_y		acceleration.raw.y	
+	acc_z	acc_z		acceleration.raw.z	
+Gyro.X					
+Gyro.Y					
+Gyro.Z					
+Magneto.X	mag_x	mag_x		magnetic.field.raw.x	mag:magnetic.field.raw.x
+Magneto.Y	mag_y	mag_y		magnetic.field.raw.y	mag:magnetic.field.raw.y
+Magneto.Z	mag_z	mag_z		magnetic.field.raw.z	mag:magnetic.field.raw.z
+Latitude					
+Longitude					
+Satellites	satcount	satcount	satellites_used	gps.satellite.count	gps:satellite.count
+Speed	speed_km_h	speed_km.h	speed_2d	ground.speed	
+			speed_3d		
+Altitude	Altitude_m	MSL_altitude_m	altitude	height.above.msl	
+		Ellipsoidal_height_m		height.above.ellipsoid	
+Battery.voltage	U_bat_mV	U_bat_mV		tag.voltage	
+Hdop	hdop	hdop		gps.hdop	gps:hdop
+Vdop				gps.vdop	
+			positiondop	gps.pdop	
+Latitude.decimal	Latitude	Latitude	latitude	location.lat	
+Longitude.decimal	Longitude	Longitude	longitude	location.long	
+Solar.voltage	solar_I_mA	solar_I_mA			
+Csv.line.type					
+Timestamp					
+Activity					
+Gsm.logging.time					
+	UTC_datetime	UTC_datetime	date_time	timestamp	
+				animal.ID	
+				animal.sex	
+				animal.taxon	individual.taxon.canonical.name
+	altimeter_m	altimeter_m		barometric.height	bar:barometric.height
+				orn.transmission.protocol	orn:transmission.protocol
+	bat_soc_pct	bat_soc_pct		battery.charge.percent	
+Searching.time			gps_fixtime	gps.time.to.fix	gps.time.to.fix
+	direction_deg	direction_deg		heading	
+	datatype	datatype		sensor.type	
+Acceleration.X				acceleration.x	
+Acceleration.Y				acceleration.y	
+Acceleration.Z				acceleration.z	
+				import.marked.outlier	
