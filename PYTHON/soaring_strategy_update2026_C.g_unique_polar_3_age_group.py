@@ -71,7 +71,7 @@ defined_threshold = 36
 
 ### --- LOAD DATA ---
 df_main = pd.read_csv(
-    r'C:\Users\PC\Documents\M2 AMU\STAGE M2\RODRIGUES_CIRCAETE\PYTHON\adaptive_soaring_strategy\prepared_data\Circaetus_gallicus2026-11-08.csv')
+    r'C:\Users\PC\Documents\M2 AMU\STAGE M2\RODRIGUES_CIRCAETE\PYTHON\adaptive_soaring_strategy\prepared_data\Circaetus_gallicus_biome_3s2026-11-25.csv')
 
 df_main = df_main.rename(columns={
     "X.m._MA": "X(m)_MA",
@@ -161,20 +161,20 @@ for individual in individuals:
         df["heading_thermal"] = df["heading"]
         df["time_delta"] = df["date_in_unix"].diff()
 
-        if len(df) < 100:
-            continue
-
         deltat = float("%.2f" % df["time_delta"].describe()["mean"])
 
         if np.isnan(deltat):
             continue
 
+        if len(df) * deltat < 100:  # durée minimale du jour : 100 s, quelle que soit la fréquence
+            continue
+
         threshold_value = defined_threshold / deltat
 
         df["thermal_check"] = 0
-        df.loc[(abs(df['R']) < 1000) & (df["vertical_speed"] > 0) & (df["horizontal_speed"] > 3), 'thermal_check'] = 1
+        df.loc[(abs(df['R']) < 100) & (df["vertical_speed"] > 0) & (df["horizontal_speed"] > 3), 'thermal_check'] = 1
 
-        rolling_window = int((3 / deltat))
+        rolling_window = max(1, int(round(3 / deltat)))
         df["thermal_check"] = df["thermal_check"].rolling(rolling_window, center=True, win_type='gaussian').mean(std=1)
         df.loc[abs(df['thermal_check']) == 0, 'heading_thermal'] = np.nan
 
@@ -799,7 +799,8 @@ axs.set_title(f'Cross-Country Optimisation Strategy {df_main["Species"].unique()
 axs.set_ylabel('Vertical Speed (m/s)', fontsize=14)
 axs.set_xlabel('Horizontal Speed (m/s)', fontsize=14)
 axs.tick_params(axis='both', labelsize=12)  # taille des chiffres sur les axes
-axs.legend(fontsize=7, loc="lower left")
+axs.legend(fontsize=9, loc="lower left", markerscale=1.3,
+           framealpha=0.9, borderpad=0.8, labelspacing=0.6)
 fig_last.tight_layout()
 
 import os

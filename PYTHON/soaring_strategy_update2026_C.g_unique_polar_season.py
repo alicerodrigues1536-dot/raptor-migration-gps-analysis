@@ -57,12 +57,12 @@ def _arrow3D(ax, x, y, z, dx, dy, dz, *args, **kwargs):
 setattr(Axes3D, 'arrow3D', _arrow3D)
 
 ### --- CONTROL FLAGS ---
-full_track_control = True
+full_track_control = False
 do_plots = False
 do_corrected_thermals = False
 circles = False
 do_last_points = False
-daily_plots = True
+daily_plots = False
 
 interval1 = 5
 interval2 = 20
@@ -71,7 +71,7 @@ defined_threshold = 36
 
 ### --- LOAD DATA ---
 df_main = pd.read_csv(
-    r'C:\Users\alrodrigues\Documents\M2 AMU\STAGE M2\RODRIGUES_CIRCAETE\PYTHON\adaptive_soaring_strategy\prepared_data\Circaetus_gallicus2026-06-05.csv')
+    r'C:\Users\PC\Documents\M2 AMU\STAGE M2\RODRIGUES_CIRCAETE\PYTHON\adaptive_soaring_strategy\prepared_data\Circaetus_gallicus_biome_3s2026-11-25.csv')
 
 df_main = df_main.rename(columns={
     "X.m._MA": "X(m)_MA",
@@ -139,7 +139,6 @@ name_indiviuals = []
 for individual in individuals:
 
     df_ind = df_main.loc[(df_main.individuals == individual)]
-    season_of_individual = individual_to_season.get(individual, "unknown")
 
     updated_all_days = pd.DataFrame()
     days = df_ind["only_date"].unique()
@@ -149,6 +148,14 @@ for individual in individuals:
 
         daily_thermal_counts = []
         df = df_ind.loc[(df_ind.only_date == day)]
+
+        # Âge et saison du jour (constants sur la journée) ; on saute les jours hors groupes
+        ages_du_jour = df["age_group"].dropna().astype(str).str.strip()
+        ages_du_jour = ages_du_jour[ages_du_jour.isin(["1", "2-4", "5+"])].unique()
+        seasons_du_jour = df[SEASON_COL].dropna().unique()
+        if len(ages_du_jour) == 0 or len(seasons_du_jour) == 0:
+            continue
+        season_of_day = f"{ages_du_jour[0]}_{seasons_du_jour[0]}"   # ex. "2-4_spring"
 
         df["to_discard"] = (abs(df["date_in_unix"].diff()) > 3.01)
         df["to_discard"] = df["to_discard"].where(df["to_discard"]).bfill(limit=5).fillna(0).astype(bool)
@@ -511,7 +518,7 @@ for individual in individuals:
             basic_mean_horizontal_speed_err.append(np.nan)
 
         # MODIFICATION 3 : enregistrer le groupe d'âge pour ce point journalier
-        basic_season.append(season_of_individual)
+        basic_season.append(season_of_day)
 
         if daily_plots:
             fig_work_parts = plt.figure()
@@ -551,7 +558,7 @@ for individual in individuals:
 
         ### daily csv
         daily_record = True
-        output_path_daily = r"C:\Users\alrodrigues\Documents\M2 AMU\STAGE M2\RODRIGUES_CIRCAETE\PYTHON\adaptive_soaring_strategy\output_data\daily_results_unique_polar_season.csv"
+        output_path_daily = r"C:\Users\PC\Documents\M2 AMU\STAGE M2\RODRIGUES_CIRCAETE\PYTHON\adaptive_soaring_strategy\output_data\daily_results_unique_polar_season.csv"
         daily_headers = ["Species", "Individual", "Date", "n_thermals", "average_wind_x", "average_wind_y",
                          "n_thermal_points", "mean_vertical_speed_thermal", "sem_vertical_speed_thermal",
                          "n_gliding_points", "mean_airspeed_gliding", "sem_airspeed_gliding"]
@@ -573,7 +580,7 @@ for individual in individuals:
 
         ### thermal rate output
         thermal_rate_record = True
-        output_path_thermal_rate = r"C:\Users\alrodrigues\Documents\M2 AMU\STAGE M2\RODRIGUES_CIRCAETE\PYTHON\adaptive_soaring_strategy\output_data\thermal_rate_unique_polar_season.csv"
+        output_path_thermal_rate = r"C:\Users\PC\Documents\M2 AMU\STAGE M2\RODRIGUES_CIRCAETE\PYTHON\adaptive_soaring_strategy\output_data\thermal_rate_unique_polar_season.csv"
         thermal_rate_headers = ["Species", "Individual", "Date", "track_start", "track_end", "n_thermals",
                                 "hf_duration_hours", "n_thermals_per_hour", "mean_thermal_duration_sec",
                                 "total_thermal_time_sec", "thermal_time_proportion"]
@@ -801,6 +808,12 @@ axs.set_ylabel('Vertical Speed (m/s)')
 axs.set_xlabel('Horizontal Speed (m/s)')
 axs.legend(fontsize=10, loc="lower left")
 fig_last.tight_layout()
+
+import os
+dossier_fig = r"C:\Users\PC\Documents\M2 AMU\STAGE M2\RODRIGUES_CIRCAETE\Figures\ANNEXES"
+os.makedirs(dossier_fig, exist_ok=True)   # crée le dossier s'il n'existe pas
+fig_last.savefig(os.path.join(dossier_fig, "polar_by_age_season.png"),
+                 dpi=300, bbox_inches="tight")
 plt.show(block=True)
 # ============================================================
 
@@ -817,7 +830,7 @@ print(f"Taux de chute minimum: {y_min_sink_mean:.2f} m/s")
 print(f"Meilleure finesse: {best_glide_ratio_mean:.1f}")
 
 record = True
-output_path = r"C:\Users\alrodrigues\Documents\M2 AMU\STAGE M2\RODRIGUES_CIRCAETE\PYTHON\adaptive_soaring_strategy\output_data\Result_soaring_strategy_unique_polar_season.csv"
+output_path = r"C:\Users\PC\Documents\M2 AMU\STAGE M2\RODRIGUES_CIRCAETE\PYTHON\adaptive_soaring_strategy\output_data\Result_soaring_strategy_unique_polar_season.csv"
 headers = ["Species", "a_mean", "b_mean", "c_mean",
            "x_best_glide_mean", "y_best_glide_mean", "best_glide_ratio_mean",
            "x_min_sink_mean", "y_min_sink_mean", "a_linear", "b_linear"]
