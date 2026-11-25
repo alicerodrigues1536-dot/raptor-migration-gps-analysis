@@ -26,13 +26,14 @@ library(stringi)
 library(suncalc)
 
 library(patchwork)
+library(conflicted)
 ```
 
 # Chargement des données
 
 ```{r}
 # Données HF Ornitela
-load(here("Alice/STE_data_preparation_June_2026/2.Data_preparation/2.1_OUTPUT_STE_France_processed_HF_A_2026-11-06.RData"))  # Point par point HF
+load(here("Alice/STE_data_preparation_June_2026/2.Data_preparation/2.1_OUTPUT_STE_France_processed_HF_A_2026-11-08.RData"))  # Point par point HF
 subset_HF.ID <- data_HF[data_HF$HF.ID == 2047, ]
 nrow(data_HF[data_HF$HF.ID == 2047, ])
 
@@ -45,6 +46,31 @@ Aquila_rapax <- read.csv(here("PYTHON/adaptive_soaring_strategy/prepared_data/Aq
 # Découpage
 
 ```{r}
+conflicts_prefer(dplyr::filter)
+
+#### Zone G : bande 17.51 - 28.749°N ####
+lat_sud  <- 17.51
+lat_nord <- 28.749
+
+# Suppression des positions sans coordonnées
+data_HF <- data_HF[complete.cases(data_HF[, c("location.long", "location.lat")]), ]
+
+data_HF <- data_HF %>%
+  mutate(Zone_G = location.lat >= lat_sud & location.lat <= lat_nord)
+
+# Contrôles
+prop.table(table(data_HF$Zone_G, useNA = "ifany")) * 100
+
+#### Découpage ####
+data_HF <- data_HF %>%
+  filter(Zone_G)
+
+range(data_HF$location.lat)   # doit donner entre 17.51 et 28.749
+```
+
+```{r}
+#| eval: false
+#| include: false
 conflicts_prefer(dplyr::filter)
 #
 ecoregions <- st_read(here( "Alice/Data_analysis_June_2026/Ecoregions2017/Ecoregions2017.shp"), wkt_filter = st_as_text( st_as_sfc(st_bbox(c( xmin = -20, xmax = 60, ymin = 0, ymax = 40 ), crs = 4326)) ) ) 
@@ -98,6 +124,35 @@ data_HF <- data_HF %>%
 range(data_HF$location.lat)   # le minimum doit être >= 17.51
 ```
 
+# Sous-echantillonnage 3 secondes
+
+```{r}
+#### Homogénéisation de la fréquence : 1 pt/s -> 1 pt/3 s ####
+conflicts_prefer(dplyr::lag)
+conflicts_prefer(dplyr::filter)
+
+data_HF <- data_HF %>%
+  arrange(HF.ID, timestamp) %>%
+  group_by(HF.ID) %>%
+  mutate(
+    dt_loc = as.numeric(difftime(timestamp, lag(timestamp), units = "secs")),
+    pct_1s_track = mean(dt_loc <= 1.5, na.rm = TRUE),   # part des intervalles à ~1 s
+    rang = row_number()
+  ) %>%
+  # Tracks majoritairement à 1 s : on garde 1 point sur 3 ; les autres sont inchangés
+  filter(pct_1s_track <= 0.5 | (rang - 1) %% 3 == 0) %>%
+  # Recalcul de dtime_new (en minutes) sur les points conservés
+  mutate(dtime_new = as.numeric(difftime(timestamp, lag(timestamp), units = "mins"))) %>%
+  ungroup() %>%
+  select(-dt_loc, -pct_1s_track, -rang)
+
+#### Contrôle : plus aucun track à 1 s ####
+data_HF %>%
+  group_by(HF.ID) %>%
+  summarise(dt_median = median(dtime_new * 60, na.rm = TRUE), .groups = "drop") %>%
+  count(dt_median_arrondi = round(dt_median))
+```
+
 # Colonnes utiles
 
 ```{r}
@@ -114,23 +169,34 @@ data_HF <- data_HF %>%
 str(data_HF)
 
 #### Groupes d'âge : 1 / 2-4 / 5+ (âge qui change au 1er juillet) ####
+
 library(dplyr)
 
-data_HF <- data_HF %>%
-  mutate(
-    age_num = suppressWarnings(as.numeric(as.character(age_year))),  # "adult" -> NA
-    age_group = case_when(
-      age_num == 1                       ~ "1",
-      age_num %in% c(2, 4)               ~ "2-4",
-      age_num >= 5 | age_year == "adult" ~ "5+",
-      TRUE                               ~ NA_character_   # reste : âge 4 (et 0)
-    ),
-    age_group = factor(age_group, levels = c("1", "2-4", "5+"))
-  ) %>%
-  select(-age_num)
+fct_age_group <- function(df) {
+  df %>%
+    mutate(
+      age_num = suppressWarnings(as.numeric(as.character(age_year))),
+      age_group = case_when(
+        age_num == 1                ~ "1",
+        age_num >= 2 & age_num <= 4 ~ "2-4",
+        age_num >= 5 | age_year == "adult" ~ "5+",
+        TRUE                        ~ NA_character_
+      ),
+      age_group = factor(age_group, levels = c("1", "2-4", "5+"))
+    ) %>%
+    select(-age_num)
+}
+
+conflicts_prefer(dplyr::select)
+
+# Application à data_HF
+data_HF <- fct_age_group(data_HF)
+
+#### Vérification ####
 
 table(data_HF$age_group, useNA = "ifany")
-table(data_HF$age_year, data_HF$age_group, useNA = "ifany")   # contrôle de la correspondance
+
+table(data_HF$age_year, data_HF$age_group, useNA = "ifany")
 ```
 
 # Visualisation data_HF
@@ -505,10 +571,651 @@ str(Circaetus_gallicus)
 table(Circaetus_gallicus$drift_ratio)
 ```
 
+# PYTHON ZONE G
+
+```{r}
+#### Librairies ####
+library(here)
+library(zoo)
+library(geosphere)
+library(lubridate)
+library(dplyr)
+library(conflicted)
+
+conflicts_prefer(dplyr::filter)
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::lag)
+conflicts_prefer(dplyr::lead)
+
+#### Chargement des données ####
+# Données HF Ornitela (point par point)
+load(here("Alice/STE_data_preparation_June_2026/2.Data_preparation/2.1_OUTPUT_STE_France_processed_HF_A_2026-11-08.RData"))
+
+# Données préparées Keskin (pour comparer les colonnes avec Circaetus_gallicus)
+Aquila_nipalensis <- read.csv(here("PYTHON/adaptive_soaring_strategy/prepared_data/Aquila_nipalensis.csv"))
+
+#### Zone G : bande 17.51 - 28.749°N ####
+lat_sud  <- 17.51
+lat_nord <- 28.749
+
+# Suppression des positions sans coordonnées
+data_HF <- data_HF[complete.cases(data_HF[, c("location.long", "location.lat")]), ]
+
+data_HF <- data_HF %>%
+  mutate(Zone_G = location.lat >= lat_sud & location.lat <= lat_nord)
+
+# Contrôle : proportion de points dans la zone
+prop.table(table(data_HF$Zone_G, useNA = "ifany")) * 100
+
+# Découpage
+data_HF <- data_HF %>%
+  filter(Zone_G)
+
+range(data_HF$location.lat)   # doit donner entre 17.51 et 28.749
+
+#### Colonnes utiles : saisons ####
+data_HF$date <- as.Date(data_HF$timestamp)
+data_HF <- data_HF %>%
+  mutate(
+    MIGRATION = case_when(
+      month(date) %in% 1:7  ~ "spring",
+      month(date) %in% 8:12 ~ "autumn",
+      TRUE ~ NA_character_
+    )
+  )
+
+#### Groupes d'âge : 1 / 2-4 / 5+ (âge qui change au 1er juillet) ####
+fct_age_group <- function(df) {
+  df %>%
+    mutate(
+      age_num = suppressWarnings(as.numeric(as.character(age_year))),
+      age_group = case_when(
+        age_num == 1                ~ "1",
+        age_num >= 2 & age_num <= 4 ~ "2-4",
+        age_num >= 5 | age_year == "adult" ~ "5+",
+        TRUE                        ~ NA_character_
+      ),
+      age_group = factor(age_group, levels = c("1", "2-4", "5+"))
+    ) %>%
+    select(-age_num)
+}
+
+data_HF <- fct_age_group(data_HF)
+
+# Vérification
+table(data_HF$age_group, useNA = "ifany")
+table(data_HF$age_year, data_HF$age_group, useNA = "ifany")
+
+#### Conversion data_HF -> Circaetus_gallicus (tout par HF.ID) ####
+# Point de référence pour transformer lat/lon en X, Y (en mètres)
+ref_lon <- min(data_HF$location.long)
+ref_lat <- min(data_HF$location.lat)
+
+data_HF$HF.ID <- as.factor(data_HF$HF.ID)
+
+Circaetus_gallicus <- data.frame(
+  HF.ID       = data_HF$HF.ID,
+  timestamp   = data_HF$timestamp,
+  X.m         = distGeo(cbind(ref_lon, ref_lat), cbind(data_HF$location.long, ref_lat)),
+  Y.m         = distGeo(cbind(ref_lon, ref_lat), cbind(ref_lon, data_HF$location.lat)),
+  Z.m         = data_HF$height.above.ground_GPS,
+  ele         = data_HF$height.above.ground_GPS,
+  lon         = data_HF$location.long,
+  lat         = data_HF$location.lat,
+  Species     = "Circaetus gallicus",
+  individuals = data_HF$individual.local.identifier,
+  dtime       = data_HF$dtime_new,
+  age_group   = data_HF$age_group,
+  season      = data_HF$MIGRATION
+)
+
+# Correction des signes (data_HF et Circaetus_gallicus ont le même ordre de lignes ici)
+Circaetus_gallicus$X.m <- ifelse(data_HF$location.long < ref_lon, -Circaetus_gallicus$X.m, Circaetus_gallicus$X.m)
+Circaetus_gallicus$Y.m <- ifelse(data_HF$location.lat  < ref_lat, -Circaetus_gallicus$Y.m, Circaetus_gallicus$Y.m)
+
+# Date et temps depuis le début de chaque HF.ID x jour
+Circaetus_gallicus$only_date <- as.Date(Circaetus_gallicus$timestamp)
+Circaetus_gallicus <- Circaetus_gallicus %>%
+  arrange(HF.ID, timestamp) %>%
+  group_by(HF.ID, only_date) %>%
+  mutate(
+    date_in_unix = as.numeric(difftime(timestamp, min(timestamp), units = "secs"))
+  ) %>%
+  ungroup()
+
+summary(Circaetus_gallicus$date_in_unix)
+summary(Circaetus_gallicus$dtime)
+
+#### Vitesses, accélérations et courbure (lissées) ####
+Circaetus_gallicus <- Circaetus_gallicus %>%
+  arrange(HF.ID, timestamp) %>%
+  group_by(HF.ID, only_date) %>%
+  mutate(
+    dtime_sec = dtime * 60,
+    
+    # MA positions
+    X.m._MA = rollmean(X.m, 5, fill = NA, align = "center"),
+    Y.m._MA = rollmean(Y.m, 5, fill = NA, align = "center"),
+    Z.m._MA = rollmean(Z.m, 5, fill = NA, align = "center"),
+    
+    # Vitesses
+    Vx  = (X.m._MA - lag(X.m._MA)) / dtime_sec,
+    Vy  = (Y.m._MA - lag(Y.m._MA)) / dtime_sec,
+    Vz  = (Z.m._MA - lag(Z.m._MA)) / dtime_sec,
+    Vxy = sqrt(Vx^2 + Vy^2),
+    
+    # MA vitesses
+    Vx_MA  = rollmean(Vx, 5, fill = NA, align = "center"),
+    Vy_MA  = rollmean(Vy, 5, fill = NA, align = "center"),
+    Vz_MA  = rollmean(Vz, 5, fill = NA, align = "center"),
+    Vxy_MA = sqrt(Vx_MA^2 + Vy_MA^2),
+    
+    # Accélérations
+    Ax = (Vx_MA - lag(Vx_MA)) / dtime_sec,
+    Ay = (Vy_MA - lag(Vy_MA)) / dtime_sec,
+    
+    # MA accélérations
+    Ax_MA = rollmean(Ax, 5, fill = NA, align = "center"),
+    Ay_MA = rollmean(Ay, 5, fill = NA, align = "center"),
+    
+    # Courbure du mouvement (virage)
+    K    = (Vx * Ay - Vy * Ax) / (Vx^2 + Vy^2)^(3/2),
+    K_MA = rollmean(K, 5, fill = NA, align = "center")
+  ) %>%
+  ungroup()
+
+# Colonnes au format Keskin
+Circaetus_gallicus$vertical_speed   <- Circaetus_gallicus$Vz_MA
+Circaetus_gallicus$horizontal_speed <- Circaetus_gallicus$Vxy_MA
+
+#### Contrôles ####
+summary(Circaetus_gallicus$Vx)
+summary(Circaetus_gallicus$Vy)
+summary(Circaetus_gallicus$Vxy)
+summary(Circaetus_gallicus$K)
+range(Circaetus_gallicus$lat)                  # entre 17.51 et 28.749
+setdiff(colnames(Circaetus_gallicus), colnames(Aquila_nipalensis))
+
+# Contrôle de la fréquence d'échantillonnage (1 s et 3 s conservés)
+Circaetus_gallicus %>%
+  group_by(HF.ID) %>%
+  summarise(dt_median = median(dtime * 60, na.rm = TRUE), .groups = "drop") %>%
+  count(dt_median_arrondi = round(dt_median))
+
+#### Groupes d'âge : suppression des positions hors groupes ####
+table(Circaetus_gallicus$age_group, useNA = "ifany")
+
+Circaetus_gallicus <- Circaetus_gallicus %>%
+  filter(!is.na(age_group)) %>%
+  mutate(age_group = factor(age_group, levels = c("1", "2-4", "5+")))
+
+table(Circaetus_gallicus$age_group, Circaetus_gallicus$season)   # effectifs par cellule
+
+#### Export CSV pour Python ####
+# age_group converti en texte pour que Python lise "1", "2-4", "5+"
+Circaetus_gallicus$age_group <- as.character(Circaetus_gallicus$age_group)
+
+write.table(Circaetus_gallicus,
+            file = paste(here("PYTHON/adaptive_soaring_strategy/prepared_data/Circaetus_gallicus"), Sys.Date(), ".csv", sep = ""),
+            row.names = FALSE, sep = ",")
+```
+
+# PYTHON ZONE ELARGIE Z
+
+```{r}
+#### Librairies ####
+library(here)
+library(zoo)
+library(geosphere)
+library(lubridate)
+library(dplyr)
+library(sf)
+library(conflicted)
+
+conflicts_prefer(dplyr::filter)
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::lag)
+conflicts_prefer(dplyr::lead)
+
+#### Chargement des données ####
+# Données HF Ornitela (point par point)
+load(here("Alice/STE_data_preparation_June_2026/2.Data_preparation/2.1_OUTPUT_STE_France_processed_HF_A_2026-11-08.RData"))
+
+# Données préparées Keskin (pour comparer les colonnes avec Circaetus_gallicus)
+Aquila_nipalensis <- read.csv(here("PYTHON/adaptive_soaring_strategy/prepared_data/Aquila_nipalensis.csv"))
+
+#### Zone d'intérêt : bande 17.51-26°N + Sahara/Tibesti au nord de 26°N ####
+# Suppression des positions sans coordonnées
+data_HF <- data_HF[complete.cases(data_HF[, c("location.long", "location.lat")]), ]
+
+# Écorégions (la bbox ne sert qu'à accélérer la lecture du shapefile)
+ecoregions <- st_read(
+  here("Alice/Data_analysis_June_2026/Ecoregions2017/Ecoregions2017.shp"),
+  wkt_filter = st_as_text(st_as_sfc(st_bbox(
+    c(xmin = -20, xmax = 60, ymin = 0, ymax = 40), crs = 4326)))
+)
+sahara_tibesti <- ecoregions[grepl("Sahara|Tibesti-Jebel Uweinat", ecoregions$ECO_NAME), ]
+plot(sahara_tibesti["BIOME_NAME"])   # contrôle visuel du polygone
+
+# Points en sf
+pts_sf <- st_as_sf(data_HF, coords = c("location.long", "location.lat"), crs = 4326)
+lat    <- st_coordinates(pts_sf)[, 2]
+
+# Test d'appartenance au polygone, seulement pour les points au nord de 26°N
+# (évite de tester tous les points : plus rapide et moins gourmand en mémoire)
+intersects_vec <- rep(FALSE, nrow(pts_sf))
+idx_nord <- which(lat > 26.0)
+intersects_vec[idx_nord] <- lengths(st_intersects(pts_sf[idx_nord, ], sahara_tibesti)) > 0
+
+data_HF$Zone_interet <- (lat >= 17.51 & lat <= 26.0) | (lat > 26.0 & intersects_vec)
+
+# Contrôles
+prop.table(table(data_HF$Zone_interet, useNA = "ifany")) * 100
+table(in_lat = lat >= 17.51 & lat <= 26.0, polygone = intersects_vec)
+
+# Découpage
+data_HF <- data_HF %>%
+  filter(Zone_interet)
+
+range(data_HF$location.lat)   # le minimum doit être >= 17.51
+
+# Vérification : aucun point retenu au sud de 17.51°N (doit donner 0)
+sum(data_HF$location.lat < 17.51)
+
+#### Colonnes utiles : saisons ####
+data_HF$date <- as.Date(data_HF$timestamp)
+data_HF <- data_HF %>%
+  mutate(
+    MIGRATION = case_when(
+      month(date) %in% 1:7  ~ "spring",
+      month(date) %in% 8:12 ~ "autumn",
+      TRUE ~ NA_character_
+    )
+  )
+
+#### Groupes d'âge : 1 / 2-4 / 5+ (âge qui change au 1er juillet) ####
+fct_age_group <- function(df) {
+  df %>%
+    mutate(
+      age_num = suppressWarnings(as.numeric(as.character(age_year))),
+      age_group = case_when(
+        age_num == 1                ~ "1",
+        age_num >= 2 & age_num <= 4 ~ "2-4",
+        age_num >= 5 | age_year == "adult" ~ "5+",
+        TRUE                        ~ NA_character_
+      ),
+      age_group = factor(age_group, levels = c("1", "2-4", "5+"))
+    ) %>%
+    select(-age_num)
+}
+
+data_HF <- fct_age_group(data_HF)
+
+# Vérification
+table(data_HF$age_group, useNA = "ifany")
+table(data_HF$age_year, data_HF$age_group, useNA = "ifany")
+
+#### Conversion data_HF -> Circaetus_gallicus (tout par HF.ID) ####
+# Point de référence pour transformer lat/lon en X, Y (en mètres)
+ref_lon <- min(data_HF$location.long)
+ref_lat <- min(data_HF$location.lat)
+
+data_HF$HF.ID <- as.factor(data_HF$HF.ID)
+
+Circaetus_gallicus <- data.frame(
+  HF.ID       = data_HF$HF.ID,
+  timestamp   = data_HF$timestamp,
+  X.m         = distGeo(cbind(ref_lon, ref_lat), cbind(data_HF$location.long, ref_lat)),
+  Y.m         = distGeo(cbind(ref_lon, ref_lat), cbind(ref_lon, data_HF$location.lat)),
+  Z.m         = data_HF$height.above.ground_GPS,
+  ele         = data_HF$height.above.ground_GPS,
+  lon         = data_HF$location.long,
+  lat         = data_HF$location.lat,
+  Species     = "Circaetus gallicus",
+  individuals = data_HF$individual.local.identifier,
+  dtime       = data_HF$dtime_new,
+  age_group   = data_HF$age_group,
+  season      = data_HF$MIGRATION
+)
+
+# Correction des signes (data_HF et Circaetus_gallicus ont le même ordre de lignes ici)
+Circaetus_gallicus$X.m <- ifelse(data_HF$location.long < ref_lon, -Circaetus_gallicus$X.m, Circaetus_gallicus$X.m)
+Circaetus_gallicus$Y.m <- ifelse(data_HF$location.lat  < ref_lat, -Circaetus_gallicus$Y.m, Circaetus_gallicus$Y.m)
+
+# Date et temps depuis le début de chaque HF.ID x jour
+Circaetus_gallicus$only_date <- as.Date(Circaetus_gallicus$timestamp)
+Circaetus_gallicus <- Circaetus_gallicus %>%
+  arrange(HF.ID, timestamp) %>%
+  group_by(HF.ID, only_date) %>%
+  mutate(
+    date_in_unix = as.numeric(difftime(timestamp, min(timestamp), units = "secs"))
+  ) %>%
+  ungroup()
+
+summary(Circaetus_gallicus$date_in_unix)
+summary(Circaetus_gallicus$dtime)
+
+#### Vitesses, accélérations et courbure (lissées) ####
+Circaetus_gallicus <- Circaetus_gallicus %>%
+  arrange(HF.ID, timestamp) %>%
+  group_by(HF.ID, only_date) %>%
+  mutate(
+    dtime_sec = dtime * 60,
+    
+    # MA positions
+    X.m._MA = rollmean(X.m, 5, fill = NA, align = "center"),
+    Y.m._MA = rollmean(Y.m, 5, fill = NA, align = "center"),
+    Z.m._MA = rollmean(Z.m, 5, fill = NA, align = "center"),
+    
+    # Vitesses
+    Vx  = (X.m._MA - lag(X.m._MA)) / dtime_sec,
+    Vy  = (Y.m._MA - lag(Y.m._MA)) / dtime_sec,
+    Vz  = (Z.m._MA - lag(Z.m._MA)) / dtime_sec,
+    Vxy = sqrt(Vx^2 + Vy^2),
+    
+    # MA vitesses
+    Vx_MA  = rollmean(Vx, 5, fill = NA, align = "center"),
+    Vy_MA  = rollmean(Vy, 5, fill = NA, align = "center"),
+    Vz_MA  = rollmean(Vz, 5, fill = NA, align = "center"),
+    Vxy_MA = sqrt(Vx_MA^2 + Vy_MA^2),
+    
+    # Accélérations
+    Ax = (Vx_MA - lag(Vx_MA)) / dtime_sec,
+    Ay = (Vy_MA - lag(Vy_MA)) / dtime_sec,
+    
+    # MA accélérations
+    Ax_MA = rollmean(Ax, 5, fill = NA, align = "center"),
+    Ay_MA = rollmean(Ay, 5, fill = NA, align = "center"),
+    
+    # Courbure du mouvement (virage)
+    K    = (Vx * Ay - Vy * Ax) / (Vx^2 + Vy^2)^(3/2),
+    K_MA = rollmean(K, 5, fill = NA, align = "center")
+  ) %>%
+  ungroup()
+
+# Colonnes au format Keskin
+Circaetus_gallicus$vertical_speed   <- Circaetus_gallicus$Vz_MA
+Circaetus_gallicus$horizontal_speed <- Circaetus_gallicus$Vxy_MA
+
+#### Contrôles ####
+summary(Circaetus_gallicus$Vx)
+summary(Circaetus_gallicus$Vy)
+summary(Circaetus_gallicus$Vxy)
+summary(Circaetus_gallicus$K)
+range(Circaetus_gallicus$lat)                  # minimum >= 17.51
+
+# Contrôle de la fréquence d'échantillonnage (1 s et 3 s conservés)
+Circaetus_gallicus %>%
+  group_by(HF.ID) %>%
+  summarise(dt_median = median(dtime * 60, na.rm = TRUE), .groups = "drop") %>%
+  count(dt_median_arrondi = round(dt_median))
+
+setdiff(colnames(Circaetus_gallicus), colnames(Aquila_nipalensis))
+
+#### Groupes d'âge : suppression des positions hors groupes ####
+table(Circaetus_gallicus$age_group, useNA = "ifany")
+
+Circaetus_gallicus <- Circaetus_gallicus %>%
+  filter(!is.na(age_group)) %>%
+  mutate(age_group = factor(age_group, levels = c("1", "2-4", "5+")))
+
+table(Circaetus_gallicus$age_group, Circaetus_gallicus$season)   # effectifs par cellule
+
+#### Export CSV pour Python ####
+# age_group converti en texte pour que Python lise "1", "2-4", "5+"
+Circaetus_gallicus$age_group <- as.character(Circaetus_gallicus$age_group)
+
+write.table(Circaetus_gallicus,
+            file = paste(here("PYTHON/adaptive_soaring_strategy/prepared_data/Circaetus_gallicus_biome"), Sys.Date(), ".csv", sep = ""),
+            row.names = FALSE, sep = ",")
+```
+
+# PYTHON ZONE ELARGIE Z 3sec
+
+```{r}
+#### Librairies ####
+library(here)
+library(zoo)
+library(geosphere)
+library(lubridate)
+library(dplyr)
+library(sf)
+library(conflicted)
+
+conflicts_prefer(dplyr::filter)
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::lag)
+conflicts_prefer(dplyr::lead)
+
+#### Chargement des données ####
+# Données HF Ornitela (point par point)
+load(here("Alice/STE_data_preparation_June_2026/2.Data_preparation/2.1_OUTPUT_STE_France_processed_HF_A_2026-11-08.RData"))
+
+# Données préparées Keskin (pour comparer les colonnes avec Circaetus_gallicus)
+Aquila_nipalensis <- read.csv(here("PYTHON/adaptive_soaring_strategy/prepared_data/Aquila_nipalensis.csv"))
+
+#### Zone d'intérêt : bande 17.51-26°N + Sahara/Tibesti au nord de 26°N ####
+# Suppression des positions sans coordonnées
+data_HF <- data_HF[complete.cases(data_HF[, c("location.long", "location.lat")]), ]
+
+# Écorégions (la bbox ne sert qu'à accélérer la lecture du shapefile)
+ecoregions <- st_read(
+  here("Alice/Data_analysis_June_2026/Ecoregions2017/Ecoregions2017.shp"),
+  wkt_filter = st_as_text(st_as_sfc(st_bbox(
+    c(xmin = -20, xmax = 60, ymin = 0, ymax = 40), crs = 4326)))
+)
+sahara_tibesti <- ecoregions[grepl("Sahara|Tibesti-Jebel Uweinat", ecoregions$ECO_NAME), ]
+plot(sahara_tibesti["BIOME_NAME"])   # contrôle visuel du polygone
+
+# Points en sf
+pts_sf <- st_as_sf(data_HF, coords = c("location.long", "location.lat"), crs = 4326)
+lat    <- st_coordinates(pts_sf)[, 2]
+
+# Test d'appartenance au polygone, seulement pour les points au nord de 26°N
+# (évite de tester tous les points : plus rapide et moins gourmand en mémoire)
+intersects_vec <- rep(FALSE, nrow(pts_sf))
+idx_nord <- which(lat > 26.0)
+intersects_vec[idx_nord] <- lengths(st_intersects(pts_sf[idx_nord, ], sahara_tibesti)) > 0
+
+data_HF$Zone_interet <- (lat >= 17.51 & lat <= 26.0) | (lat > 26.0 & intersects_vec)
+
+# Contrôles
+prop.table(table(data_HF$Zone_interet, useNA = "ifany")) * 100
+table(in_lat = lat >= 17.51 & lat <= 26.0, polygone = intersects_vec)
+
+# Découpage
+data_HF <- data_HF %>%
+  filter(Zone_interet)
+
+range(data_HF$location.lat)   # le minimum doit être >= 17.51
+
+# Vérification : aucun point retenu au sud de 17.51°N (doit donner 0)
+sum(data_HF$location.lat < 17.51)
+
+#### Homogénéisation de la fréquence : 1 pt/s -> 1 pt/3 s ####
+# Les tracks majoritairement à 1 s sont sous-échantillonnés (1 point sur 3).
+# Les autres tracks restent inchangés (dtime_new d'origine conservé).
+data_HF <- data_HF %>%
+  arrange(HF.ID, timestamp) %>%
+  group_by(HF.ID) %>%
+  mutate(
+    dt_loc       = as.numeric(difftime(timestamp, lag(timestamp), units = "secs")),
+    pct_1s_track = mean(dt_loc <= 1.5, na.rm = TRUE),   # part des intervalles à ~1 s
+    sous_ech     = pct_1s_track > 0.5,
+    rang         = row_number()
+  ) %>%
+  filter(!sous_ech | (rang - 1) %% 3 == 0) %>%
+  mutate(
+    # Tracks sous-échantillonnés : dt recalculé (en minutes) sur les points conservés
+    dtime_new = if_else(
+      sous_ech,
+      as.numeric(difftime(timestamp, lag(timestamp), units = "mins")),
+      dtime_new
+    )
+  ) %>%
+  ungroup() %>%
+  select(-dt_loc, -pct_1s_track, -sous_ech, -rang)
+
+# Contrôle : plus aucun track à 1 s (attendu : médianes autour de 3 s)
+data_HF %>%
+  group_by(HF.ID) %>%
+  summarise(dt_median = median(dtime_new * 60, na.rm = TRUE), .groups = "drop") %>%
+  count(dt_median_arrondi = round(dt_median))
+
+#### Colonnes utiles : saisons ####
+data_HF$date <- as.Date(data_HF$timestamp)
+data_HF <- data_HF %>%
+  mutate(
+    MIGRATION = case_when(
+      month(date) %in% 1:7  ~ "spring",
+      month(date) %in% 8:12 ~ "autumn",
+      TRUE ~ NA_character_
+    )
+  )
+
+#### Groupes d'âge : 1 / 2-4 / 5+ (âge qui change au 1er juillet) ####
+fct_age_group <- function(df) {
+  df %>%
+    mutate(
+      age_num = suppressWarnings(as.numeric(as.character(age_year))),
+      age_group = case_when(
+        age_num == 1                ~ "1",
+        age_num >= 2 & age_num <= 4 ~ "2-4",
+        age_num >= 5 | age_year == "adult" ~ "5+",
+        TRUE                        ~ NA_character_
+      ),
+      age_group = factor(age_group, levels = c("1", "2-4", "5+"))
+    ) %>%
+    select(-age_num)
+}
+
+data_HF <- fct_age_group(data_HF)
+
+# Vérification
+table(data_HF$age_group, useNA = "ifany")
+table(data_HF$age_year, data_HF$age_group, useNA = "ifany")
+
+#### Conversion data_HF -> Circaetus_gallicus (tout par HF.ID) ####
+# Point de référence pour transformer lat/lon en X, Y (en mètres)
+ref_lon <- min(data_HF$location.long)
+ref_lat <- min(data_HF$location.lat)
+
+data_HF$HF.ID <- as.factor(data_HF$HF.ID)
+
+Circaetus_gallicus <- data.frame(
+  HF.ID       = data_HF$HF.ID,
+  timestamp   = data_HF$timestamp,
+  X.m         = distGeo(cbind(ref_lon, ref_lat), cbind(data_HF$location.long, ref_lat)),
+  Y.m         = distGeo(cbind(ref_lon, ref_lat), cbind(ref_lon, data_HF$location.lat)),
+  Z.m         = data_HF$height.above.ground_GPS,
+  ele         = data_HF$height.above.ground_GPS,
+  lon         = data_HF$location.long,
+  lat         = data_HF$location.lat,
+  Species     = "Circaetus gallicus",
+  individuals = data_HF$individual.local.identifier,
+  dtime       = data_HF$dtime_new,
+  age_group   = data_HF$age_group,
+  season      = data_HF$MIGRATION
+)
+
+# Correction des signes (data_HF et Circaetus_gallicus ont le même ordre de lignes ici)
+Circaetus_gallicus$X.m <- ifelse(data_HF$location.long < ref_lon, -Circaetus_gallicus$X.m, Circaetus_gallicus$X.m)
+Circaetus_gallicus$Y.m <- ifelse(data_HF$location.lat  < ref_lat, -Circaetus_gallicus$Y.m, Circaetus_gallicus$Y.m)
+
+# Date et temps depuis le début de chaque HF.ID x jour
+Circaetus_gallicus$only_date <- as.Date(Circaetus_gallicus$timestamp)
+Circaetus_gallicus <- Circaetus_gallicus %>%
+  arrange(HF.ID, timestamp) %>%
+  group_by(HF.ID, only_date) %>%
+  mutate(
+    date_in_unix = as.numeric(difftime(timestamp, min(timestamp), units = "secs"))
+  ) %>%
+  ungroup()
+
+summary(Circaetus_gallicus$date_in_unix)
+summary(Circaetus_gallicus$dtime)
+
+#### Vitesses, accélérations et courbure (lissées) ####
+Circaetus_gallicus <- Circaetus_gallicus %>%
+  arrange(HF.ID, timestamp) %>%
+  group_by(HF.ID, only_date) %>%
+  mutate(
+    dtime_sec = dtime * 60,
+    
+    # MA positions
+    X.m._MA = rollmean(X.m, 5, fill = NA, align = "center"),
+    Y.m._MA = rollmean(Y.m, 5, fill = NA, align = "center"),
+    Z.m._MA = rollmean(Z.m, 5, fill = NA, align = "center"),
+    
+    # Vitesses
+    Vx  = (X.m._MA - lag(X.m._MA)) / dtime_sec,
+    Vy  = (Y.m._MA - lag(Y.m._MA)) / dtime_sec,
+    Vz  = (Z.m._MA - lag(Z.m._MA)) / dtime_sec,
+    Vxy = sqrt(Vx^2 + Vy^2),
+    
+    # MA vitesses
+    Vx_MA  = rollmean(Vx, 5, fill = NA, align = "center"),
+    Vy_MA  = rollmean(Vy, 5, fill = NA, align = "center"),
+    Vz_MA  = rollmean(Vz, 5, fill = NA, align = "center"),
+    Vxy_MA = sqrt(Vx_MA^2 + Vy_MA^2),
+    
+    # Accélérations
+    Ax = (Vx_MA - lag(Vx_MA)) / dtime_sec,
+    Ay = (Vy_MA - lag(Vy_MA)) / dtime_sec,
+    
+    # MA accélérations
+    Ax_MA = rollmean(Ax, 5, fill = NA, align = "center"),
+    Ay_MA = rollmean(Ay, 5, fill = NA, align = "center"),
+    
+    # Courbure du mouvement (virage)
+    K    = (Vx * Ay - Vy * Ax) / (Vx^2 + Vy^2)^(3/2),
+    K_MA = rollmean(K, 5, fill = NA, align = "center")
+  ) %>%
+  ungroup()
+
+# Colonnes au format Keskin
+Circaetus_gallicus$vertical_speed   <- Circaetus_gallicus$Vz_MA
+Circaetus_gallicus$horizontal_speed <- Circaetus_gallicus$Vxy_MA
+
+#### Contrôles ####
+summary(Circaetus_gallicus$Vx)
+summary(Circaetus_gallicus$Vy)
+summary(Circaetus_gallicus$Vxy)
+summary(Circaetus_gallicus$K)
+range(Circaetus_gallicus$lat)                  # minimum >= 17.51
+
+# Contrôle de la fréquence d'échantillonnage (attendu : tout autour de 3 s)
+Circaetus_gallicus %>%
+  group_by(HF.ID) %>%
+  summarise(dt_median = median(dtime * 60, na.rm = TRUE), .groups = "drop") %>%
+  count(dt_median_arrondi = round(dt_median))
+
+setdiff(colnames(Circaetus_gallicus), colnames(Aquila_nipalensis))
+
+#### Groupes d'âge : suppression des positions hors groupes ####
+table(Circaetus_gallicus$age_group, useNA = "ifany")
+
+Circaetus_gallicus <- Circaetus_gallicus %>%
+  filter(!is.na(age_group)) %>%
+  mutate(age_group = factor(age_group, levels = c("1", "2-4", "5+")))
+
+table(Circaetus_gallicus$age_group, Circaetus_gallicus$season)   # effectifs par cellule
+
+#### Export CSV (biome, sous-échantillonné à 3 s) ####
+# age_group converti en texte pour que Python lise "1", "2-4", "5+"
+Circaetus_gallicus$age_group <- as.character(Circaetus_gallicus$age_group)
+
+write.table(Circaetus_gallicus,
+            file = paste(here("PYTHON/adaptive_soaring_strategy/prepared_data/Circaetus_gallicus_biome_3s"), Sys.Date(), ".csv", sep = ""),
+            row.names = FALSE, sep = ",")
+```
+
 # START script analyse
 
 ```{r}
-Circaetus_gallicus <- read.csv(here("PYTHON/adaptive_soaring_strategy/prepared_data/Circaetus_gallicus2026-11-08.csv"))
+#| eval: false
+#| include: false
+Circaetus_gallicus <- read.csv(here("PYTHON/adaptive_soaring_strategy/prepared_data/Circaetus_gallicus2026-11-13.csv"))
 ```
 
 # Visuels et calculs indépendants
@@ -698,122 +1405,6 @@ Sys.sleep(1)
 #  filename = here("Figures/thermal_test_zone_autumn2025.png"),
 #  fmt = "png"
 #)
-```
-
-```{r}
-#### Seulement une ZONE TEST THERMIQUE (Autumn 2025)
-start_date <- as.POSIXct("2025-10-15 16:00")
-end_date   <- as.POSIXct("2025-10-15 16:30")
-
-segment_to_plot <- Circaetus_gallicus3[
-  Circaetus_gallicus1$individuals == "Robin Nohood" &
-  Circaetus_gallicus1$timestamp >= start_date &
-  Circaetus_gallicus1$timestamp <= end_date,
-]
-segment_to_plot <- segment_to_plot[order(segment_to_plot$timestamp),]
-
-segment_to_plot$color <- ifelse(segment_to_plot$flight_phase_smooth == "thermalling", "red",
-                         ifelse(segment_to_plot$flight_phase_smooth == "gliding", "blue",
-                                "grey"))
-
-# Forcer une vraie fenêtre OpenGL avec taille fixe
-options(rgl.useNULL = FALSE)
-rgl::open3d(windowRect = c(0, 0, 1000, 1000))
-
-rgl::plot3d(x = segment_to_plot$X.m, y = segment_to_plot$Y.m, z = segment_to_plot$Z.m,
-            col = c(segment_to_plot$color), ylab = "Y(m)", xlab = "X(m)", zlab = "Z(m)")
-
-# Légende
-rgl::legend3d(
-  "topright",
-  legend = c("Thermalling", "Gliding", "Other"),
-  pch = 16,
-  col = c("red", "blue", "grey"),
-  cex = 2.3,
-  inset = c(0.02)
-)
-
-Sys.sleep(1)
-
-rgl::rgl.snapshot(
-  filename = here("Figures/thermal_test_zone_autumn2025.png"),
-  fmt = "png"
-)
-```
-
-# Visualisation comp vent et comp th/gl
-
-```{r}
-#| eval: false
-#| include: false
-start_date <- as.POSIXct("2025-03-02 12:19") # La Diva 0 thermiques (2047)
-end_date   <- as.POSIXct("2025-03-02 14:15")
-
-# Filtrer les dates pour l'individu "La Diva de Buoux"
-segment_to_plot <- Circaetus_gallicus3[
-  Circaetus_gallicus1$individuals == "La Diva de Buoux" &
-  Circaetus_gallicus1$timestamp >= start_date &
-  Circaetus_gallicus1$timestamp <= end_date,
-]
-segment_to_plot <- segment_to_plot[order(segment_to_plot$timestamp),]
-
-# 3 couleurs (= 3 comportements à afficher) :
-segment_to_plot$color <- ifelse(segment_to_plot$flight_phase_smooth == "thermalling", "red",
-                         ifelse(segment_to_plot$flight_phase_smooth == "gliding", "blue",
-                                "grey"))
-
-rgl::plot3d(x = segment_to_plot$X.m, y = segment_to_plot$Y.m, z = segment_to_plot$Z.m,
-            col = c(segment_to_plot$color) , ylab = "Y(m)", xlab= "X(m)" , zlab = "Z(m)")
-
-
-
-### Couleur par comp
-unique (Circaetus_gallicus3$comp)
-table (Circaetus_gallicus3$comp)
-
-
-# Palette de couleurs pour chaque comp
-comp_colors <- c(
-  "CF"  = "orange",  # Full compensation — orange
-  "CP"  = "yellow",  # Partial compensation — yellow
-  "DF"  = "skyblue3",  # Full drift — jaune
-  "DO"  = "blue1",  # Over drift — orange
-  "CO"  = "red",  # Over compensation
-  "NSW" = "#bababa",  # No sidewind — gris
-  "0"   = "#ffffff"   # Non classifié — blanc
-)
-
-# Filtrer
-segment_to_plot <- Circaetus_gallicus3[
-  Circaetus_gallicus3$individuals == "La Diva de Buoux" &
-  Circaetus_gallicus3$timestamp >= start_date &
-  Circaetus_gallicus3$timestamp <= end_date,
-]
-segment_to_plot <- segment_to_plot[order(segment_to_plot$timestamp), ]
-
-# Assigner la couleur selon comp
-segment_to_plot$color <- comp_colors[as.character(segment_to_plot$comp)]
-segment_to_plot$color[is.na(segment_to_plot$color)] <- "grey60"  # NA -> gris
-
-# Plot 3D
-rgl::plot3d(
-  x = segment_to_plot$X.m,
-  y = segment_to_plot$Y.m,
-  z = segment_to_plot$Z.m,
-  col  = segment_to_plot$color,
-  xlab = "X(m)", ylab = "Y(m)", zlab = "Z(m)"
-)
-
-# Légende
-rgl::legend3d(
-  "topright",
-  legend = names(comp_colors),
-  col    = comp_colors,
-  pch    = 16,
-  cex    = 0.8
-)
-
-str(Circaetus_gallicus3)
 ```
 
 # Métriques thermiques
@@ -1596,81 +2187,22 @@ table(thermals_all$age_group, useNA = "always")
 table(thermals_all$season, useNA = "always")
 ```
 
-## Récupération de 1 comp par HF.ID et 1 drift_ratio moyen par HF.ID
-
-```{r}
-#| eval: false
-#| include: false
-##### Tableau thermique
-
-str(Circaetus_gallicus3_jour)
-str(tableau_thermiques)
-
-## comp
-
-# Comp dominant par HF.ID
-comp_dominant <- Circaetus_gallicus3_jour %>%
-  group_by(HF.ID) %>%
-  count(comp) %>%
-  slice_max(n, n = 1, with_ties = FALSE) %>%
-  dplyr::select(HF.ID, comp_dominant = comp)
-
-# Jointure
-tableau_thermiques <- tableau_thermiques %>%
-  left_join(comp_dominant, by = "HF.ID")
-
-str(tableau_thermiques)
-tableau_thermiques$comp_dominant <- as.factor (tableau_thermiques$comp_dominant)
-
-
-##
-comp_proportions <- Circaetus_gallicus3_jour %>%
-  group_by(HF.ID) %>%
-  count(comp) %>%
-  mutate(prop = n / sum(n)) %>%
-  arrange(HF.ID, desc(prop))
-comp_proportions #Très bien proportion de 1 (Rq : La majorité des tracks sont < 1h et 1 comp / track)
-unique(comp_proportions$prop) # Forcément 1
-
-## drift_ratio
-class(Circaetus_gallicus3_jour$drift_ratio)
-Circaetus_gallicus3_jour$drift_ratio <- as.numeric(
-  Circaetus_gallicus3_jour$drift_ratio
-)
-table(Circaetus_gallicus3_jour$drift_ratio)
-
-drift_ratio_moyen <- Circaetus_gallicus3_jour %>%
-  group_by(HF.ID) %>%
-  summarise(
-    drift_ratio_moyen = mean(drift_ratio, na.rm = TRUE)
-  )
-head(drift_ratio_moyen)
-summary(drift_ratio_moyen$drift_ratio_moyen)
-
-
-tableau_thermiques <- tableau_thermiques %>%
-  left_join(drift_ratio_moyen, by = "HF.ID")
-
-summary(tableau_thermiques$drift_ratio_moyen)
-
-
-##### thermals_all : Gain d'altitude = 1 ligne par thermique valide
-
-
-```
-
 ## Lme nb thermiques/heure by age_group & season
 
 ```{r}
-#### Nombre de thermiques par heure : 3 groupes d'âge ####
+#### Nombre de thermiques par heure : predict sur lme (niveau 0) + IC via vcov ####
 library(conflicted)
 conflicts_prefer(lmerTest::lmer)
-conflicts_prefer(ggplot2::annotate)
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::filter)
 library(dplyr)
+library(tidyr)
 library(ggplot2)
 library(ggeffects)
+library(nlme)
 library(performance)
 library(scales)
+library(here)
 
 niveaux_age <- c("1", "2-4", "5+")
 cols_fill <- c("1" = "#FF6FA5", "2-4" = "#FF9F1C", "5+" = "#00B074")
@@ -1678,61 +2210,78 @@ cols_pts  <- c("1" = "#C2185B", "2-4" = "#C96A00", "5+" = "#00693F")
 labs_age  <- c("1" = "1 yr",    "2-4" = "2-4 yrs", "5+" = "≥ 5 yrs")
 
 #### Préparation des données ####
-str(tableau_thermiques)
+# tableau_thermiques doit venir des données de la zone G (17.51 - 28.749)
 tableau_thermiques <- tableau_thermiques %>%
-  filter(!is.na(age_group)) %>%
+  filter(!is.na(age_group), !is.na(thermiques_par_heure)) %>%
   mutate(ID        = as.factor(ID),
          age_group = factor(age_group, levels = niveaux_age),
          season    = factor(season, levels = c("autumn", "spring")))
 
 table(tableau_thermiques$age_group, tableau_thermiques$season)   # effectifs par cellule
+tableau_thermiques %>% group_by(season, age_group) %>%
+  summarise(n_ID = n_distinct(ID), n = n(), .groups = "drop")
 
-#### Modèles mixtes ####
-lme_ther1 <- lmer(thermiques_par_heure ~ age_group + season + (1|ID), data = tableau_thermiques)
-summary(lme_ther1)
-lme_ther2 <- lmer(thermiques_par_heure ~ age_group + season + age_group:season + (1|ID),
-                  data = tableau_thermiques)
+#### Modèles mixtes lmer (AIC, R², comparaison avec ggpredict) ####
+lme_ther1 <- lmerTest::lmer(thermiques_par_heure ~ age_group + season + (1 | ID),
+                            data = tableau_thermiques, REML = FALSE)
+lme_ther2 <- lmerTest::lmer(thermiques_par_heure ~ age_group * season + (1 | ID),
+                            data = tableau_thermiques, REML = FALSE)
+AIC(lme_ther1, lme_ther2)
+r2_ther <- performance::r2(lme_ther2)
+r2_ther
 summary(lme_ther2)
 
-AIC(lme_ther1, lme_ther2)
-r2_ther <- performance::r2(lme_ther2)   # si "Random effect variances not available" : voir remarque
-r2_ther
+#### Modèle lme (nlme) pour predict niveau 0 ####
+mod_ther <- nlme::lme(fixed = thermiques_par_heure ~ age_group * season,
+                      random = ~ 1 | ID, method = "REML",
+                      data = tableau_thermiques, na.action = na.omit)
+summary(mod_ther)
 
-#### Effets prédits ####
-pred <- ggpredict(lme_ther2, terms = c("season", "age_group"))
-new_data <- as.data.frame(pred)
-colnames(new_data)[colnames(new_data) == "x"]     <- "season"
-colnames(new_data)[colnames(new_data) == "group"] <- "age_group"
-new_data$age_group <- factor(new_data$age_group, levels = niveaux_age)
+#### Prédictions niveau 0 (effets fixes seuls) ####
+# Uniquement les cellules qui ont des données
+newd <- expand.grid(age_group = levels(tableau_thermiques$age_group),
+                    season    = levels(tableau_thermiques$season)) %>%
+  mutate(age_group = factor(age_group, levels = niveaux_age),
+         season    = factor(season, levels = c("autumn", "spring"))) %>%
+  semi_join(tableau_thermiques, by = c("age_group", "season"))
+
+fit <- predict(mod_ther, newd, level = 0)
+
+#### SE à la main : sqrt(diag(X V X')) ####
+X <- model.matrix(~ age_group * season, data = newd)
+X <- X[, names(nlme::fixef(mod_ther)), drop = FALSE]
+se <- sqrt(diag(X %*% vcov(mod_ther) %*% t(X)))
+
+# Quantile t prudent (min des ddl) ; remplace par 1.96 pour coller au cours
+ddl   <- summary(mod_ther)$tTable[, "DF"]
+ddl
+t_crit <- qt(0.975, df = min(ddl))
+
+new_data <- newd %>%
+  mutate(predicted = as.numeric(fit),
+         se        = se,
+         conf.low  = predicted - t_crit * se,
+         conf.high = predicted + t_crit * se)
+new_data
 
 #### Positions x explicites : saisons bien espacées ####
 offsets    <- c("1" = -0.3, "2-4" = 0, "5+" = 0.3)
 pos_season <- c(autumn = 0, spring = 1.3)
 
-new_data$season_num <- pos_season[as.character(new_data$season)]
-tableau_thermiques$season_num <- pos_season[as.character(tableau_thermiques$season)]
-new_data$x_pos <- new_data$season_num + offsets[as.character(new_data$age_group)]
-tableau_thermiques$x_pos <- tableau_thermiques$season_num +
+new_data$x_pos <- pos_season[as.character(new_data$season)] + offsets[as.character(new_data$age_group)]
+tableau_thermiques$x_pos <- pos_season[as.character(tableau_thermiques$season)] +
   offsets[as.character(tableau_thermiques$age_group)]
 
-# Ne garder que les cellules qui ont des données
-cellules <- tableau_thermiques %>% distinct(age_group, season) %>%
-  mutate(age_group = as.character(age_group), season = as.character(season))
-new_data_plot <- new_data %>%
-  mutate(age_group = as.character(age_group), season = as.character(season)) %>%
-  semi_join(cellules, by = c("age_group", "season")) %>%
-  mutate(age_group = factor(age_group, levels = niveaux_age))
-
 #### Figure ####
-p_nombre <- ggplot() +
+p_nombre_lme <- ggplot() +
   geom_point(data = tableau_thermiques,
              aes(x = x_pos, y = thermiques_par_heure, color = age_group),
              position = position_jitter(width = 0.05, height = 0),
              alpha = 0.20, size = 1) +
-  geom_col(data = new_data_plot,
+  geom_col(data = new_data,
            aes(x = x_pos, y = predicted, fill = age_group),
            width = 0.28, alpha = 0.7, color = "black") +
-  geom_errorbar(data = new_data_plot,
+  geom_errorbar(data = new_data,
                 aes(x = x_pos, ymin = conf.low, ymax = conf.high),
                 width = 0.1, linewidth = 0.7) +
   scale_fill_manual(values = cols_fill, labels = labs_age) +
@@ -1740,154 +2289,284 @@ p_nombre <- ggplot() +
   scale_x_continuous(breaks = pos_season,
                      labels = c("Autumn", "Spring"),
                      limits = c(-0.6, 1.9)) +
-  scale_y_continuous(breaks = scales::pretty_breaks(n = 20)) +
-  coord_cartesian(ylim = c(0, 20)) +
+  scale_y_continuous(breaks = seq(0, 20, by = 2)) +   # graduations de 2 en 2 : 0, 2, 4, ... 20
+  coord_cartesian(ylim = c(0, 20)) +                  # même espace sous le 0 que les autres figures
   labs(x = "Season", y = "Number of thermals per hour", fill = NULL, color = NULL) +
   theme_classic(base_size = 18) +
+  theme_classic(base_size = 20) +
+  theme_classic(base_size = 20) +
   theme(
-    legend.position = "inside",
-    legend.position.inside = c(0.02, 0.96),
-    legend.justification = c(0, 1),
-    legend.background = element_rect(fill = "white", color = NA),
-    plot.title    = element_text(face = "bold", size = 14),
-    plot.subtitle = element_text(size = 9, color = "grey50"),
-    plot.caption  = element_text(size = 8, color = "grey50", hjust = 0),
-    axis.text.y   = element_text(size = 12)
+    axis.title.x = element_text(size = 22),
+    axis.title.y = element_text(size = 22),
+    axis.text.x  = element_text(size = 18),
+    axis.text.y  = element_text(size = 17),
+    legend.position = "none"
   )
 
-p_nombre
+p_nombre_lme
 
-ggsave(here("Figures/Figures principales/thermals_by_season.png"),
-       plot = p_nombre, width = 7, height = 5, dpi = 300)
+#### Sauvegarde ####
+ggsave(here("Figures/Figures principales/thermals_by_season_lme.png"),
+       plot = p_nombre_lme, width = 7, height = 5, dpi = 300)
+
+#### Comparaison avec ggpredict (lmer) ####
+comp <- bind_rows(
+  new_data %>% transmute(age_group, season, methode = "lme + predict(level=0)",
+                         fit = predicted, low = conf.low, high = conf.high),
+  as.data.frame(ggpredict(lme_ther2, terms = c("season", "age_group"))) %>%
+    transmute(season    = factor(as.character(x), levels = c("autumn", "spring")),
+              age_group = factor(as.character(group), levels = niveaux_age),
+              methode   = "ggpredict (lmer)",
+              fit = predicted, low = conf.low, high = conf.high) %>%
+    semi_join(newd, by = c("season", "age_group"))
+) %>%
+  mutate(largeur_IC = high - low)
+comp %>% arrange(season, age_group, methode)
 
 #### Taille d'effet ####
-conflicts_prefer(dplyr::select)
-
 # Variation saisonnière pour chaque classe d'âge
 var_season_nb_ther <- new_data %>%
   select(age_group, season, predicted) %>%
-  tidyr::pivot_wider(names_from = season, values_from = predicted) %>%
+  pivot_wider(names_from = season, values_from = predicted) %>%
   mutate(variation_percent = (spring - autumn) / autumn * 100)
 var_season_nb_ther
-
-unique(new_data$age_group)
-table(tableau_thermiques$age_group, useNA = "ifany")
-table(tableau_thermiques$age_group, tableau_thermiques$season)
 
 # Variation entre âges pour chaque saison (référence : groupe "5+")
 var_age_nb_ther <- new_data %>%
   select(age_group, season, predicted) %>%
-  tidyr::pivot_wider(names_from = age_group, values_from = predicted) %>%
+  pivot_wider(names_from = age_group, values_from = predicted) %>%
   mutate(
     var_1_vs_5plus   = (`1`   - `5+`) / `5+` * 100,
     var_2_3_vs_5plus = (`2-4` - `5+`) / `5+` * 100
   )
 var_age_nb_ther
-```
 
-### N stat nb ther
 
-```{r}
-tableau_thermiques$age_group <- as.factor (tableau_thermiques$age_group)
-summary(tableau_thermiques)
 
-# nb ID
-length(unique(tableau_thermiques$ID))
-```
-
-## Lme incluant le comportement de réponse au vent
-
-### Comp
-
-```{r}
-#| eval: false
-#| include: false
-conflict_prefer("lmer", "lmerTest")
-
-#### Comp
-
+#####
 str(tableau_thermiques)
-# lme
-lme_ther3 <- lmer(thermiques_par_heure ~ comp_dominant + season + (1|ID), data = tableau_thermiques)
-summary(lme_ther3)
-lme_ther4 <- lmer(thermiques_par_heure ~ comp_dominant + age_group + (1|ID), data = tableau_thermiques)
-summary(lme_ther4)
 
-lme_ther5 <- lmer(thermiques_par_heure ~ comp_dominant * season + (1|ID), data = tableau_thermiques)
-summary(lme_ther5)
-lme_ther6 <- lmer(thermiques_par_heure ~ comp_dominant * age_group + (1|ID), data = tableau_thermiques)
-summary(lme_ther6)
+#### Séquences avec plus de 14 thermiques par heure : dates et heures ####
+library(dplyr)
 
-lme_ther6 <- lmer(thermiques_par_heure ~ comp_dominant + age_group + season + (1|ID), data = tableau_thermiques)
-summary(lme_ther6)
+seuil <- 14
 
-lme_ther7 <- lmer(thermiques_par_heure ~ comp_dominant * season * age_group + (1|ID), data = tableau_thermiques)
-summary(lme_ther7)
-```
+seq_14 <- tableau_thermiques %>%
+  filter(thermiques_par_heure > seuil) %>%
+  mutate(timestamp_debut = as.POSIXct(timestamp_debut, tz = "UTC"),
+         timestamp_fin   = as.POSIXct(timestamp_fin,   tz = "UTC"),
+         date_debut      = as.Date(timestamp_debut),
+         heure_debut     = format(timestamp_debut, "%H:%M:%S"),
+         date_fin        = as.Date(timestamp_fin),
+         heure_fin       = format(timestamp_fin, "%H:%M:%S")) %>%
+  arrange(desc(thermiques_par_heure)) %>%
+  select(HF.ID, ID, age_group, season,
+         date_debut, heure_debut, date_fin, heure_fin,
+         duree_mins, mins_depuis_lever,
+         n_thermiques, thermiques_par_heure)
 
-### Drift_ratio
-
-```{r}
-#| eval: false
-#| include: false
-conflict_prefer("lmer", "lmerTest")
-
-#### drift_ratio_moyen
-tableau_thermiques$log_drift_ratio <- log1p(tableau_thermiques$drift_ratio_moyen)
-summary(tableau_thermiques$log_drift_ratio) # 75 % des valeurs sont inférieures à 0.21.
-hist(tableau_thermiques$log_drift_ratio) # oula
+nrow(seq_14)   # nombre de séquences concernées
+print(seq_14, n = Inf, width = Inf)   # width = Inf : affiche toutes les colonnes
+View(seq_14)                        # ou dans une fenêtre
 
 
-library(lme4)
+# Visualisation
+#### Visualisation 3D des tracks > 14 thermiques/heure ####
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::filter)
+options(rgl.useNULL = FALSE)   # force une vraie fenêtre OpenGL
 
-lme_ther3 <- lmer(
-  thermiques_par_heure ~ log_drift_ratio + season + (1|ID),
-  data = tableau_thermiques
-)
-summary(lme_ther3)
+#### Fonction : trace un HF.ID avec les thermiques comptés ####
+plot_track_thermiques <- function(hf_id, data = Circaetus_gallicus3_jour) {
+  
+  track <- data %>%
+    filter(HF.ID == hf_id) %>%
+    arrange(timestamp) %>%
+    mutate(timestamp = as.POSIXct(timestamp, tz = "UTC"))
+  
+  if (nrow(track) == 0) stop("Aucun point pour HF.ID = ", hf_id)
+  
+  # Thermiques détectés (mêmes critères que le comptage)
+  therm <- decrire_thermiques(track)
+  n_th  <- nrow(therm)
+  
+  # Infos pour le titre
+  indiv     <- as.character(first(track$individuals))
+  age       <- as.character(first(track$age_group))
+  saison    <- as.character(first(track$season))
+  t_debut   <- min(track$timestamp)
+  t_fin     <- max(track$timestamp)
+  duree_min <- as.numeric(difftime(t_fin, t_debut, units = "mins"))
+  th_par_h  <- n_th / duree_min * 60
+  
+  cat("HF.ID", hf_id, "|", indiv, "|", age, "|", saison, "\n",
+      format(t_debut, "%Y-%m-%d %H:%M:%S"), "->",
+      format(t_fin, "%Y-%m-%d %H:%M:%S"), "UTC |",
+      round(duree_min, 1), "min |",
+      n_th, "thermiques |", round(th_par_h, 1), "/h |",
+      nrow(track), "points\n")
+  
+  # Couleurs : gliding = bleu, other = gris, thermique COMPTÉ = rouge
+  track$color <- ifelse(track$flight_phase_smooth == "gliding", "blue", "grey60")
+  for (i in seq_len(n_th)) {
+    in_th <- track$timestamp >= therm$start_time[i] &
+      track$timestamp <= therm$end_time[i]
+    track$color[in_th] <- "red"
+  }
+  
+  rgl::open3d(windowRect = c(0, 0, 1000, 1000))
+  rgl::plot3d(track$X.m, track$Y.m, track$Z.m,
+              col = track$color, size = 4,
+              xlab = "X (m)", ylab = "Y (m)", zlab = "Z (m)")
+  rgl::lines3d(track$X.m, track$Y.m, track$Z.m, col = "grey70", alpha = 0.4)
+  rgl::aspect3d(1, 1, 0.3)
+  
+  # Titre : individu / HF.ID / âge / saison
+  rgl::title3d(
+    main = paste0(indiv, "  (HF.ID ", hf_id, ", age ", age, ", ", saison, ")"),
+    sub  = paste0(format(t_debut, "%Y-%m-%d %H:%M"), " -> ",
+                  format(t_fin, "%H:%M"), " UTC  |  ",
+                  round(duree_min), " min  |  ",
+                  n_th, " thermiques  (", round(th_par_h, 1), "/h)"),
+    line = 2
+  )
+  
+  # Légende
+  rgl::legend3d("topright",
+                legend = c(paste0("Thermique compté (n = ", n_th, ")"),
+                           "Gliding", "Other"),
+                col = c("red", "blue", "grey60"),
+                pch = 16, cex = 1.2)
+  
+  invisible(list(track = track, thermiques = therm))
+}
 
-lme_ther4 <- lmer(
-  thermiques_par_heure ~ log_drift_ratio + age_group + (1|ID),
-  data = tableau_thermiques
-)
-summary(lme_ther4)
+#### Séquences concernées ####
+seq_14 %>%
+  select(HF.ID, ID, age_group, season, date_debut, heure_debut,
+         heure_fin, duree_mins, n_thermiques, thermiques_par_heure)
 
-lme_ther5 <- lmer(
-  thermiques_par_heure ~ log_drift_ratio * season + (1|ID),
-  data = tableau_thermiques
-)
-summary(lme_ther5)
+#### Retrouver le HF.ID d'une séquence par date et heure de début (UTC) ####
+# Exemple : tes deux séquences
+seq_14 %>%
+  filter((date_debut == as.Date("2026-10-13") & heure_debut == "12:27:43") |
+           (date_debut == as.Date("2026-10-10") & heure_debut == "13:16:19")) %>%
+  select(HF.ID, ID, date_debut, heure_debut, heure_fin,
+         n_thermiques, thermiques_par_heure)
 
-lme_ther6 <- lmer(
-  thermiques_par_heure ~ log_drift_ratio * age_group + (1|ID),
-  data = tableau_thermiques
-)
-summary(lme_ther6)
+#### Un track à la fois ####
+res <- plot_track_thermiques(seq_14$HF.ID[1])
+res$thermiques %>%
+  mutate(duree_s = duration_sec) %>%
+  select(start_time, end_time, n_points, duree_s, gain_altitude)
 
-lme_ther7 <- lmer(
-  thermiques_par_heure ~ log_drift_ratio + age_group + season + (1|ID),
-  data = tableau_thermiques
-)
-summary(lme_ther7)
+# Autres tracks : plot_track_thermiques(seq_14$HF.ID[2]), etc.
 
-lme_ther8 <- lmer(
-  thermiques_par_heure ~ log_drift_ratio * season * age_group + (1|ID),
-  data = tableau_thermiques
-)
-summary(lme_ther8)
+#### Capture (optionnel) ####
+# Sys.sleep(1)
+# rgl::rgl.snapshot(here("Figures/thermiques_HF_ID_check.png"), fmt = "png")
+
+
+
+# HF à 1 ou 3 secondes d'intervale?
+
+#### Fréquence d'échantillonnage : tracks > 14 thermiques/heure vs les autres ####
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::filter)
+conflicts_prefer(dplyr::lag)
+
+# Intervalle (en secondes) entre points consécutifs, par HF.ID
+intervalles <- Circaetus_gallicus3_jour %>%
+  mutate(timestamp = as.POSIXct(timestamp, tz = "UTC")) %>%
+  arrange(HF.ID, timestamp) %>%
+  group_by(HF.ID) %>%
+  mutate(dt_sec = as.numeric(difftime(timestamp, lag(timestamp), units = "secs"))) %>%
+  ungroup() %>%
+  filter(!is.na(dt_sec)) %>%
+  mutate(
+    classe_dt = case_when(
+      dt_sec <= 1.5             ~ "1 s",
+      dt_sec > 1.5 & dt_sec <= 4 ~ "3 s",
+      dt_sec > 4 & dt_sec <= 10  ~ "4-10 s",
+      TRUE                       ~ ">10 s (trou)"
+    ),
+    classe_dt = factor(classe_dt, levels = c("1 s", "3 s", "4-10 s", ">10 s (trou)")),
+    groupe = ifelse(HF.ID %in% seq_14$HF.ID, "> 14 thermiques/h", "autres tracks")
+  )
+
+#### Par track : médiane et part de chaque classe d'intervalle ####
+resume_tracks <- intervalles %>%
+  group_by(HF.ID, groupe) %>%
+  summarise(
+    n_points      = n() + 1,
+    dt_median_sec = median(dt_sec),
+    pct_1s        = mean(classe_dt == "1 s") * 100,
+    pct_3s        = mean(classe_dt == "3 s") * 100,
+    pct_autre     = mean(!classe_dt %in% c("1 s", "3 s")) * 100,
+    .groups = "drop"
+  ) %>%
+  left_join(seq_14 %>% select(HF.ID, ID, date_debut, heure_debut, n_thermiques, thermiques_par_heure),
+            by = "HF.ID")
+
+# Détail des tracks suspects
+resume_tracks %>%
+  filter(groupe == "> 14 thermiques/h") %>%
+  arrange(desc(thermiques_par_heure)) %>%
+  print(n = Inf, width = Inf)
+
+#### Comparaison globale des deux groupes ####
+# Répartition des intervalles (en % des points)
+intervalles %>%
+  count(groupe, classe_dt) %>%
+  group_by(groupe) %>%
+  mutate(pct = round(n / sum(n) * 100, 1)) %>%
+  select(-n) %>%
+  tidyr::pivot_wider(names_from = classe_dt, values_from = pct)
+
+# Médiane des médianes par groupe
+resume_tracks %>%
+  group_by(groupe) %>%
+  summarise(n_tracks = n(), mediane_dt = median(dt_median_sec), .groups = "drop")
+
+#### Distribution des dt_median_sec sur tous les tracks ####
+resume_tracks %>% count(dt_median_sec)
+
+#### Lien avec le nombre de thermiques/heure ####
+# Si le sur-comptage vient de l'échantillonnage à 1 s, les tracks à 1 s auront plus de thermiques/h
+tableau_thermiques %>%
+  left_join(resume_tracks %>% select(HF.ID, dt_median_sec, pct_1s), by = "HF.ID") %>%
+  mutate(echantillonnage = ifelse(pct_1s > 50, "majoritairement 1 s", "majoritairement 3 s ou plus")) %>%
+  group_by(echantillonnage) %>%
+  summarise(n_tracks = n(),
+            moy_ther_h = round(mean(thermiques_par_heure), 2),
+            max_ther_h = round(max(thermiques_par_heure), 2),
+            .groups = "drop")
+
+
+
+#
+AIC(lme_ther1, lme_ther2)
+r2_ther <- performance::r2(lme_ther2)
+r2_ther
+summary(lme_ther2)
 ```
 
 ## Lme gain d'altitude
 
 ```{r}
-#### Gain d'altitude par thermique : 3 groupes d'âge ####
+#### Gain d'altitude par thermique : predict sur lme (niveau 0) + IC via vcov ####
 library(conflicted)
 conflicts_prefer(lmerTest::lmer)
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::filter)
 library(dplyr)
+library(tidyr)
 library(ggplot2)
 library(ggeffects)
+library(nlme)
 library(performance)
 library(scales)
+library(here)
 
 niveaux_age <- c("1", "2-4", "5+")
 cols_fill <- c("1" = "#FF6FA5", "2-4" = "#FF9F1C", "5+" = "#00B074")
@@ -1895,17 +2574,19 @@ cols_pts  <- c("1" = "#C2185B", "2-4" = "#C96A00", "5+" = "#00693F")
 labs_age  <- c("1" = "1 yr",    "2-4" = "2-4 yrs", "5+" = "≥ 5 yrs")
 
 #### Préparation des données ####
+# Vérifier que thermals_all est bien construit à partir des données de la zone G (17.51 - 28.749)
 str(thermals_all)
 thermals_all <- thermals_all %>%
-  filter(!is.na(age_group)) %>%
+  filter(!is.na(age_group), !is.na(gain_altitude)) %>%
   mutate(age_group = factor(age_group, levels = niveaux_age),
          season    = factor(season, levels = c("autumn", "spring")))
 
 table(thermals_all$age_group, thermals_all$season)   # effectifs par cellule
+thermals_all %>% group_by(season, age_group) %>%
+  summarise(n_ind = n_distinct(individuals), n = n(), .groups = "drop")
 
-#### Modèles mixtes (gain brut) ####
+#### Modèles mixtes lmer (AIC, R², diagnostic, comparaison avec ggpredict) ####
 lme_gt1 <- lmer(gain_altitude ~ age_group + season + (1|individuals), data = thermals_all)
-summary(lme_gt1)
 lme_gt2 <- lmer(gain_altitude ~ age_group + season + age_group:season + (1|individuals),
                 data = thermals_all)
 summary(lme_gt2)
@@ -1914,13 +2595,12 @@ AIC(lme_gt1, lme_gt2)
 r2_gt <- performance::r2(lme_gt2)
 r2_gt
 
-#### Modèle avec transformation log signée ####
+#### Modèle avec transformation log signée (diagnostic uniquement) ####
 thermals_all$gain_altitude_logmod <- sign(thermals_all$gain_altitude) *
   log(abs(thermals_all$gain_altitude) + 1)
 
 lme_gt2_log <- lmer(gain_altitude_logmod ~ age_group + season + age_group:season + (1|individuals),
                     data = thermals_all)
-summary(lme_gt2_log)
 r2_gt_log <- performance::r2(lme_gt2_log)
 r2_gt_log
 
@@ -1936,47 +2616,74 @@ diag_residus <- function(modele, titre){
   abline(h = 0, col = "red", lty = 2)
   par(mfrow = c(1, 1))
 }
-
 diag_residus(lme_gt2,     "brut")
 diag_residus(lme_gt2_log, "log signé")
-# => Meilleur avec log
 
-#### Effets prédits ####
-# La figure utilise le modèle brut (en mètres). La transformation log signée n'est pas
-# rétro-transformée par ggpredict : garder le modèle brut pour la figure.
-pred <- ggpredict(lme_gt2, terms = c("season", "age_group"))
-new_data <- as.data.frame(pred)
-colnames(new_data)[colnames(new_data) == "x"]     <- "season"
-colnames(new_data)[colnames(new_data) == "group"] <- "age_group"
-new_data$age_group <- factor(new_data$age_group, levels = niveaux_age)
+#### Modèle lme (même structure que lme_gt2, modèle brut en mètres) ####
+mod_gt <- nlme::lme(gain_altitude ~ age_group + season + age_group:season,
+                    random = ~ 1 | individuals, method = "REML",
+                    data = thermals_all, na.action = na.omit)
+summary(mod_gt)
+
+#### Prédictions niveau 0 (effets fixes seuls) ####
+# Uniquement les cellules qui ont des données
+newd <- expand.grid(age_group = levels(thermals_all$age_group),
+                    season    = levels(thermals_all$season)) %>%
+  mutate(age_group = factor(age_group, levels = niveaux_age),
+         season    = factor(season, levels = c("autumn", "spring"))) %>%
+  semi_join(thermals_all, by = c("age_group", "season"))
+
+fit <- predict(mod_gt, newd, level = 0)
+
+#### SE à la main : sqrt(diag(X V X')) ####
+X <- model.matrix(~ age_group + season + age_group:season, data = newd)
+X <- X[, names(nlme::fixef(mod_gt)), drop = FALSE]   # aligne les colonnes sur les effets fixes estimés
+se <- sqrt(diag(X %*% vcov(mod_gt) %*% t(X)))
+
+# Quantile t (effet de l'âge joué entre individus : peu de ddl malgré beaucoup de thermiques)
+# min(ddl) = choix prudent ; remplace par 1.96 pour coller au cours
+ddl  <- summary(mod_gt)$tTable[, "DF"]
+ddl
+q_ic <- qt(0.975, df = min(ddl))
+
+new_data <- newd %>%
+  mutate(predicted = as.numeric(fit),
+         se        = se,
+         conf.low  = predicted - q_ic * se,
+         conf.high = predicted + q_ic * se)
+new_data
+
+#### Comparaison avec ggpredict (lmer) ####
+comp <- bind_rows(
+  new_data %>% transmute(age_group, season, methode = "lme + predict(level=0)",
+                         fit = predicted, low = conf.low, high = conf.high),
+  as.data.frame(ggpredict(lme_gt2, terms = c("season", "age_group"))) %>%
+    transmute(season    = factor(as.character(x), levels = c("autumn", "spring")),
+              age_group = factor(as.character(group), levels = niveaux_age),
+              methode   = "ggpredict (lmer)",
+              fit = predicted, low = conf.low, high = conf.high) %>%
+    semi_join(newd, by = c("season", "age_group"))
+) %>%
+  mutate(largeur_IC = high - low)
+comp %>% arrange(season, age_group, methode)
 
 #### Positions x explicites : saisons bien espacées ####
 offsets    <- c("1" = -0.3, "2-4" = 0, "5+" = 0.3)
 pos_season <- c(autumn = 0, spring = 1.3)
 
-new_data$season_num <- pos_season[as.character(new_data$season)]
-thermals_all$season_num <- pos_season[as.character(thermals_all$season)]
-new_data$x_pos <- new_data$season_num + offsets[as.character(new_data$age_group)]
-thermals_all$x_pos <- thermals_all$season_num + offsets[as.character(thermals_all$age_group)]
-
-# Ne garder que les cellules qui ont des données
-cellules <- thermals_all %>% distinct(age_group, season) %>%
-  mutate(age_group = as.character(age_group), season = as.character(season))
-new_data_plot <- new_data %>%
-  mutate(age_group = as.character(age_group), season = as.character(season)) %>%
-  semi_join(cellules, by = c("age_group", "season")) %>%
-  mutate(age_group = factor(age_group, levels = niveaux_age))
+new_data$x_pos     <- pos_season[as.character(new_data$season)] + offsets[as.character(new_data$age_group)]
+thermals_all$x_pos <- pos_season[as.character(thermals_all$season)] + offsets[as.character(thermals_all$age_group)]
 
 #### Figure (Panel C) ####
-p_altitude <- ggplot() +
+p_altitude_lme <- ggplot() +
   geom_point(data = thermals_all,
              aes(x = x_pos, y = gain_altitude, color = age_group),
              position = position_jitter(width = 0.05, height = 0),
              alpha = 0.10, size = 1) +
-  geom_col(data = new_data_plot,
+  geom_col(data = new_data,
            aes(x = x_pos, y = predicted, fill = age_group),
            width = 0.28, alpha = 0.7, color = "black") +
-  geom_errorbar(data = new_data_plot,
+  geom_errorbar(data = new_data,
                 aes(x = x_pos, ymin = conf.low, ymax = conf.high),
                 width = 0.1, linewidth = 0.7) +
   scale_fill_manual(values = cols_fill, labels = labs_age) +
@@ -1985,57 +2692,46 @@ p_altitude <- ggplot() +
                      labels = c("Autumn", "Spring"),
                      limits = c(-0.6, 1.9)) +
   scale_y_continuous(breaks = scales::pretty_breaks(n = 10)) +
-  labs(x = "Season", y = "Altitude gain per thermal (m)", fill = NULL, color = NULL) +
-  theme_classic(base_size = 18) +
+  labs(x = "Season", y = "Altitude gain per thermal (m)") +
+  theme_classic(base_size = 20) +
   theme(
-    legend.position = "inside",
-    legend.position.inside = c(0.02, 0.96),
-    legend.justification = c(0, 1),
-    legend.background = element_rect(fill = "white", color = NA),
-    plot.title    = element_text(face = "bold", size = 14),
-    plot.subtitle = element_text(size = 9, color = "grey50"),
-    plot.caption  = element_text(size = 8, color = "grey50", hjust = 0),
-    axis.text.y   = element_text(size = 12)
+    axis.title.x = element_text(size = 22),
+    axis.title.y = element_text(size = 22),
+    axis.text.x  = element_text(size = 18),
+    axis.text.y  = element_text(size = 17),
+    legend.position = "none"
   )
 
-p_altitude
+p_altitude_lme
 
-ggsave(here("Figures/Figures principales/altitude_gain_thermals_by_season.png"),
-       plot = p_altitude, width = 7, height = 5, dpi = 300)
+#### Sauvegarde ####
+ggsave(here("Figures/Figures principales/altitude_gain_thermals_by_season_lme.png"),
+       plot = p_altitude_lme, width = 7, height = 5, dpi = 300)
 
 #### Taille d'effet : pourcentage de variation ####
-conflicts_prefer(dplyr::select)
-
 # Variation saisonnière pour chaque classe d'âge
 var_season_alt_gain_ther <- new_data %>%
   select(age_group, season, predicted) %>%
-  tidyr::pivot_wider(names_from = season, values_from = predicted) %>%
+  pivot_wider(names_from = season, values_from = predicted) %>%
   mutate(variation_percent = (spring - autumn) / autumn * 100)
 var_season_alt_gain_ther
 
 # Variation entre âges pour chaque saison (référence : groupe "5+")
 var_age_alt_gain_ther <- new_data %>%
   select(age_group, season, predicted) %>%
-  tidyr::pivot_wider(names_from = age_group, values_from = predicted) %>%
+  pivot_wider(names_from = age_group, values_from = predicted) %>%
   mutate(
     var_1_vs_5plus   = (`1`   - `5+`) / `5+` * 100,
     var_2_3_vs_5plus = (`2-4` - `5+`) / `5+` * 100
   )
 var_age_alt_gain_ther
-```
 
-### N stats gain et duree ther
-
-```{r}
 #
-thermals_all$age_group <- as.factor(thermals_all$age_group)
-summary(thermals_all)
+summary(lme_gt2)
 
-# proportion de négatifs  alt gain
-
-sum(thermals_all$gain_altitude < 0, na.rm = TRUE)
-mean(thermals_all$gain_altitude < 0, na.rm = TRUE)  # proportion directement
-sum(is.na(thermals_all$gain_altitude))  # pour savoir combien de NA il y a
+AIC(lme_gt1, lme_gt2)
+r2_gt <- performance::r2(lme_gt2)
+r2_gt
 ```
 
 ## Lme temps passé par thermique
@@ -2190,46 +2886,90 @@ var_age_time_ther <- new_data %>%
 var_age_time_ther
 ```
 
-## Lme gain d'altitude et Drift ratio
+## N stat 3 analyses : Nb ther/h, gain d'alt et duree ther
 
 ```{r}
-#| eval: false
-#| include: false
-lme_gt3 <- lmer(
-  gain_altitude ~ log_drift_ratio + season + (1|ID),
-  data = thermals_all
-)
-summary(lme_gt3)
+#### Effectifs des trois variables de thermiques (zone G) ####
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::filter)
 
-lme_gt4 <- lmer(
-  gain_altitude ~ log_drift_ratio + age_group + (1|ID),
-  data = thermals_all
-)
-summary(lme_gt4)
+# Jeux filtrés comme dans les modèles
+therm_G <- tableau_thermiques %>%
+  filter(!is.na(age_group), !is.na(thermiques_par_heure))
 
-lme_gt5 <- lmer(
-  gain_altitude ~ log_drift_ratio * season + (1|ID),
-  data = thermals_all
-)
-summary(lme_gt5)
+alt_G <- thermals_all %>%
+  filter(!is.na(age_group), !is.na(gain_altitude))
 
-lme_gt6 <- lmer(
-  gain_altitude ~ log_drift_ratio * age_group + (1|ID),
-  data = thermals_all
-)
-summary(lme_gt6)
+dur_G <- thermals_all %>%
+  filter(!is.na(age_group), !is.na(duration_sec))
 
-lme_gt7 <- lmer(
-  gain_altitude ~ log_drift_ratio + age_group + season + (1|ID),
-  data = thermals_all
-)
-summary(lme_gt7)
+#### Résumés généraux ####
+summary(therm_G)
+summary(alt_G)
+summary(dur_G)
 
-lme_gt8 <- lmer(
-  gain_altitude ~ log_drift_ratio * season * age_group + (1|ID),
-  data = thermals_all
-)
-summary(lme_gt8)
+#### Nombre total d'ID ####
+n_distinct(therm_G$ID)
+n_distinct(alt_G$individuals)
+n_distinct(dur_G$individuals)
+
+# Nombre d'ID par saison
+therm_G %>% group_by(season) %>% summarise(n_ID = n_distinct(ID), .groups = "drop")
+alt_G   %>% group_by(season) %>% summarise(n_ID = n_distinct(individuals), .groups = "drop")
+dur_G   %>% group_by(season) %>% summarise(n_ID = n_distinct(individuals), .groups = "drop")
+
+# Détail du nombre de valeurs par individu et par saison
+table(therm_G$ID, therm_G$season)
+table(alt_G$individuals, alt_G$season)
+table(dur_G$individuals, dur_G$season)
+
+#### Nombre de valeurs et d'ID par saison x groupe d'âge ####
+
+# Nombre de thermiques par heure (1 valeur = 1 track)
+therm_G %>%
+  group_by(season, age_group) %>%
+  summarise(
+    n_valeurs = sum(!is.na(thermiques_par_heure)),
+    n_ID      = n_distinct(ID),
+    .groups   = "drop"
+  )
+
+# Gain d'altitude (1 valeur = 1 thermique)
+alt_G %>%
+  group_by(season, age_group) %>%
+  summarise(
+    n_valeurs = sum(!is.na(gain_altitude)),
+    n_ID      = n_distinct(individuals),
+    .groups   = "drop"
+  )
+
+# Durée des thermiques (1 valeur = 1 thermique)
+dur_G %>%
+  group_by(season, age_group) %>%
+  summarise(
+    n_valeurs = sum(!is.na(duration_sec)),
+    n_ID      = n_distinct(individuals),
+    .groups   = "drop"
+  )
+
+# Tableaux croisés : nombre de valeurs
+table(therm_G$season, therm_G$age_group)
+table(alt_G$season,   alt_G$age_group)
+table(dur_G$season,   dur_G$age_group)
+
+#### Nombre total de valeurs et d'ID utilisés dans les modèles ####
+nrow(therm_G); n_distinct(therm_G$ID)
+nrow(alt_G);   n_distinct(alt_G$individuals)
+nrow(dur_G);   n_distinct(dur_G$individuals)
+
+#### Contrôle : mêmes individus dans les trois analyses ? ####
+ids_therm <- sort(unique(as.character(therm_G$ID)))
+ids_alt   <- sort(unique(as.character(alt_G$individuals)))
+ids_dur   <- sort(unique(as.character(dur_G$individuals)))
+
+setdiff(ids_therm, ids_alt)   # dans thermiques/heure seulement
+setdiff(ids_alt, ids_therm)   # dans gain d'altitude seulement
+setdiff(ids_alt, ids_dur)     # doit être vide (même jeu thermals_all)
 ```
 
 # % variation
